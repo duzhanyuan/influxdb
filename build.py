@@ -24,6 +24,7 @@ DATA_DIR = "/var/lib/influxdb"
 SCRIPT_DIR = "/usr/lib/influxdb/scripts"
 CONFIG_DIR = "/etc/influxdb"
 LOGROTATE_DIR = "/etc/logrotate.d"
+MAN_DIR = "/usr/share/man"
 
 INIT_SCRIPT = "scripts/init.sh"
 SYSTEMD_SCRIPT = "scripts/influxdb.service"
@@ -48,7 +49,7 @@ VENDOR = "InfluxData"
 DESCRIPTION = "Distributed time-series database."
 
 prereqs = [ 'git', 'go' ]
-go_vet_command = "go tool vet -example=false ./"
+go_vet_command = "go tool vet ./"
 optional_prereqs = [ 'fpm', 'rpmbuild', 'gpg' ]
 
 fpm_common_args = "-f -s dir --log error \
@@ -61,6 +62,7 @@ fpm_common_args = "-f -s dir --log error \
 --maintainer {} \
 --directories {} \
 --directories {} \
+--directories {} \
 --description \"{}\"".format(
      VENDOR,
      PACKAGE_URL,
@@ -71,6 +73,7 @@ fpm_common_args = "-f -s dir --log error \
      MAINTAINER,
      LOG_DIR,
      DATA_DIR,
+     MAN_DIR,
      DESCRIPTION)
 
 for f in CONFIGURATION_FILES:
@@ -120,7 +123,8 @@ def create_package_fs(build_root):
              DATA_DIR[1:],
              SCRIPT_DIR[1:],
              CONFIG_DIR[1:],
-             LOGROTATE_DIR[1:] ]
+             LOGROTATE_DIR[1:],
+             MAN_DIR[1:] ]
     for d in dirs:
         os.makedirs(os.path.join(build_root, d))
         os.chmod(os.path.join(build_root, d), 0o755)
@@ -144,21 +148,13 @@ def package_scripts(build_root, config_only=False, windows=False):
         shutil.copyfile(DEFAULT_CONFIG, os.path.join(build_root, CONFIG_DIR[1:], "influxdb.conf"))
         os.chmod(os.path.join(build_root, CONFIG_DIR[1:], "influxdb.conf"), 0o644)
 
-def run_generate():
-    """Run 'go generate' to rebuild any static assets.
-    """
-    logging.info("Running 'go generate'...")
-    if not check_path_for("statik"):
-        run("go install github.com/rakyll/statik")
-    orig_path = None
-    if os.path.join(os.environ.get("GOPATH"), "bin") not in os.environ["PATH"].split(os.pathsep):
-        orig_path = os.environ["PATH"].split(os.pathsep)
-        os.environ["PATH"] = os.environ["PATH"].split(os.pathsep).append(os.path.join(os.environ.get("GOPATH"), "bin"))
-    run("rm -f ./services/admin/statik/statik.go")
-    run("go generate ./services/admin")
-    if orig_path is not None:
-        os.environ["PATH"] = orig_path
-    return True
+def package_man_files(build_root):
+    """Copy and gzip man pages to the package filesystem."""
+    logging.debug("Installing man pages.")
+    run("make -C man/ clean install DESTDIR={}/usr".format(build_root))
+    for path, dir, files in os.walk(os.path.join(build_root, MAN_DIR[1:])):
+        for f in files:
+            run("gzip -9n {}".format(os.path.join(path, f)))
 
 def go_get(branch, update=False, no_uncommitted=False):
     """Retrieve build dependencies or restore pinned dependencies.
@@ -175,7 +171,7 @@ def go_get(branch, update=False, no_uncommitted=False):
     run("{}/bin/gdm restore -v".format(os.environ.get("GOPATH")))
     return True
 
-def run_tests(race, parallel, timeout, no_vet):
+def run_tests(race, parallel, timeout, no_vet, junit=False):
     """Run the Go test suite on binary output.
     """
     logging.info("Starting tests...")
@@ -207,9 +203,33 @@ def run_tests(race, parallel, timeout, no_vet):
     if timeout is not None:
         test_command += " -timeout {}".format(timeout)
     test_command += " ./..."
-    logging.info("Running tests...")
-    output = run(test_command)
-    logging.debug("Test output:\n{}".format(output.encode('ascii', 'ignore')))
+    if junit:
+        logging.info("Retrieving go-junit-report...")
+        run("go get github.com/jstemmer/go-junit-report")
+
+        # Retrieve the output from this command.
+        logging.info("Running tests...")
+        logging.debug("{}".format(test_command))
+        proc = subprocess.Popen(test_command.split(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        output, unused_err = proc.communicate()
+        output = output.decode('utf-8').strip()
+
+        # Process the output through go-junit-report.
+        with open('test-results.xml', 'w') as f:
+            logging.debug("{}".format("go-junit-report"))
+            junit_proc = subprocess.Popen(["go-junit-report"], stdin=subprocess.PIPE, stdout=f, stderr=subprocess.PIPE)
+            unused_output, err = junit_proc.communicate(output.encode('ascii', 'ignore'))
+            if junit_proc.returncode != 0:
+                logging.error("Command '{}' failed with error: {}".format("go-junit-report", err))
+                sys.exit(1)
+
+        if proc.returncode != 0:
+            logging.error("Command '{}' failed with error: {}".format(test_command, output.encode('ascii', 'ignore')))
+            sys.exit(1)
+    else:
+        logging.info("Running tests...")
+        output = run(test_command)
+        logging.debug("Test output:\n{}".format(out.encode('ascii', 'ignore')))
     return True
 
 ################
@@ -321,6 +341,8 @@ def get_system_arch():
         arch = "amd64"
     elif arch == "386":
         arch = "i386"
+    elif arch == "aarch64":
+        arch = "arm64"
     elif 'arm' in arch:
         # Prevent uname from reporting full ARM arch (eg 'armv7l')
         arch = "arm"
@@ -602,6 +624,9 @@ def package(build_output, pkg_name, version, nightly=False, iteration=1, static=
                     create_package_fs(build_root)
                     package_scripts(build_root)
 
+                if platform != "windows":
+                    package_man_files(build_root)
+
                 for binary in targets:
                     # Copy newly-built binaries to packaging directory
                     if platform == 'windows':
@@ -762,12 +787,8 @@ def main(args):
         if not go_get(args.branch, update=args.update, no_uncommitted=args.no_uncommitted):
             return 1
 
-    if args.generate:
-        if not run_generate():
-            return 1
-
     if args.test:
-        if not run_tests(args.race, args.parallel, args.timeout, args.no_vet):
+        if not run_tests(args.race, args.parallel, args.timeout, args.no_vet, args.junit_report):
             return 1
 
     platforms = []
@@ -936,9 +957,6 @@ if __name__ == '__main__':
                         type=str,
                         default=DEFAULT_BUCKET,
                         help='Destination bucket for uploads')
-    parser.add_argument('--generate',
-                        action='store_true',
-                        help='Run "go generate" before building')
     parser.add_argument('--build-tags',
                         metavar='<tags>',
                         help='Optional build tags to use for compilation')
@@ -951,6 +969,9 @@ if __name__ == '__main__':
     parser.add_argument('--test',
                         action='store_true',
                         help='Run tests (does not produce build output)')
+    parser.add_argument('--junit-report',
+                        action='store_true',
+                        help='Output tests in the JUnit XML format')
     parser.add_argument('--no-vet',
                         action='store_true',
                         help='Do not run "go vet" when running tests')

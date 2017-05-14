@@ -1,5 +1,5 @@
-// This is an implementation of the Nelder-Mead optimization method
-// Based on work by Michael F. Hutt http://www.mikehutt.com/neldermead.html
+// Package neldermead is an implementation of the Nelder-Mead optimization method.
+// Based on work by Michael F. Hutt: http://www.mikehutt.com/neldermead.html
 package neldermead
 
 import "math"
@@ -14,16 +14,19 @@ const (
 	defaultGamma = 2.0
 )
 
+// Optimizer represents the parameters to the Nelder-Mead simplex method.
 type Optimizer struct {
+	// Maximum number of iterations.
 	MaxIterations int
-	// reflection coefficient
+	// Reflection coefficient.
 	Alpha,
-	// contraction coefficient
+	// Contraction coefficient.
 	Beta,
-	// expansion coefficient
+	// Expansion coefficient.
 	Gamma float64
 }
 
+// New returns a new instance of Optimizer with all values set to the defaults.
 func New() *Optimizer {
 	return &Optimizer{
 		MaxIterations: defaultMaxIterations,
@@ -33,12 +36,12 @@ func New() *Optimizer {
 	}
 }
 
+// Optimize applies the Nelder-Mead simplex method with the Optimizer's settings.
 func (o *Optimizer) Optimize(
 	objfunc func([]float64) float64,
 	start []float64,
 	epsilon,
 	scale float64,
-	constrain func([]float64),
 ) (float64, []float64) {
 	n := len(start)
 
@@ -83,10 +86,6 @@ func (o *Optimizer) Optimize(
 		}
 	}
 
-	if constrain != nil {
-		constrain(v[n])
-	}
-
 	// find the initial function values
 	for j := 0; j <= n; j++ {
 		f[j] = objfunc(v[j])
@@ -129,9 +128,6 @@ func (o *Optimizer) Optimize(
 		for i := 0; i <= n-1; i++ {
 			vr[i] = vm[i] + o.Alpha*(vm[i]-v[vg][i])
 		}
-		if constrain != nil {
-			constrain(vr)
-		}
 
 		// value of function at reflection point
 		fr := objfunc(vr)
@@ -147,9 +143,6 @@ func (o *Optimizer) Optimize(
 		if fr < f[vs] {
 			for i := 0; i <= n-1; i++ {
 				ve[i] = vm[i] + o.Gamma*(vr[i]-vm[i])
-			}
-			if constrain != nil {
-				constrain(ve)
 			}
 
 			// value of function at expansion point
@@ -186,10 +179,6 @@ func (o *Optimizer) Optimize(
 				}
 			}
 
-			if constrain != nil {
-				constrain(vc)
-			}
-
 			// value of function at contraction point
 			fc := objfunc(vc)
 
@@ -210,17 +199,7 @@ func (o *Optimizer) Optimize(
 						}
 					}
 				}
-
-				if constrain != nil {
-					constrain(v[vg])
-				}
-
 				f[vg] = objfunc(v[vg])
-
-				if constrain != nil {
-					constrain(v[vh])
-				}
-
 				f[vh] = objfunc(v[vh])
 			}
 		}

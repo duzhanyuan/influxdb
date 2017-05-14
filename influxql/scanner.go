@@ -32,7 +32,7 @@ func (s *Scanner) Scan() (tok Token, pos Pos, lit string) {
 		return s.scanWhitespace()
 	} else if isLetter(ch0) || ch0 == '_' {
 		s.r.unread()
-		return s.scanIdent()
+		return s.scanIdent(true)
 	} else if isDigit(ch0) {
 		return s.scanNumber()
 	}
@@ -43,7 +43,7 @@ func (s *Scanner) Scan() (tok Token, pos Pos, lit string) {
 		return EOF, pos, ""
 	case '"':
 		s.r.unread()
-		return s.scanIdent()
+		return s.scanIdent(true)
 	case '\'':
 		return s.scanString()
 	case '.':
@@ -54,17 +54,42 @@ func (s *Scanner) Scan() (tok Token, pos Pos, lit string) {
 		}
 		return DOT, pos, ""
 	case '$':
-		tok, _, lit := s.scanIdent()
-		if tok == IDENT {
-			tok = BOUNDPARAM
+		tok, _, lit = s.scanIdent(false)
+		if tok != IDENT {
+			return tok, pos, "$" + lit
 		}
-		return tok, pos, lit
-	case '+', '-':
-		return s.scanNumber()
+		return BOUNDPARAM, pos, "$" + lit
+	case '+':
+		return ADD, pos, ""
+	case '-':
+		ch1, _ := s.r.read()
+		if ch1 == '-' {
+			s.skipUntilNewline()
+			return COMMENT, pos, ""
+		}
+		s.r.unread()
+		return SUB, pos, ""
 	case '*':
 		return MUL, pos, ""
 	case '/':
+		ch1, _ := s.r.read()
+		if ch1 == '*' {
+			if err := s.skipUntilEndComment(); err != nil {
+				return ILLEGAL, pos, ""
+			}
+			return COMMENT, pos, ""
+		} else {
+			s.r.unread()
+		}
 		return DIV, pos, ""
+	case '%':
+		return MOD, pos, ""
+	case '&':
+		return BITWISE_AND, pos, ""
+	case '|':
+		return BITWISE_OR, pos, ""
+	case '^':
+		return BITWISE_XOR, pos, ""
 	case '=':
 		if ch1, _ := s.r.read(); ch1 == '~' {
 			return EQREGEX, pos, ""
@@ -135,7 +160,37 @@ func (s *Scanner) scanWhitespace() (tok Token, pos Pos, lit string) {
 	return WS, pos, buf.String()
 }
 
-func (s *Scanner) scanIdent() (tok Token, pos Pos, lit string) {
+// skipUntilNewline skips characters until it reaches a newline.
+func (s *Scanner) skipUntilNewline() {
+	for {
+		if ch, _ := s.r.read(); ch == '\n' || ch == eof {
+			return
+		}
+	}
+}
+
+// skipUntilEndComment skips characters until it reaches a '*/' symbol.
+func (s *Scanner) skipUntilEndComment() error {
+	for {
+		if ch1, _ := s.r.read(); ch1 == '*' {
+			// We might be at the end.
+		star:
+			ch2, _ := s.r.read()
+			if ch2 == '/' {
+				return nil
+			} else if ch2 == '*' {
+				// We are back in the state machine since we see a star.
+				goto star
+			} else if ch2 == eof {
+				return io.EOF
+			}
+		} else if ch1 == eof {
+			return io.EOF
+		}
+	}
+}
+
+func (s *Scanner) scanIdent(lookup bool) (tok Token, pos Pos, lit string) {
 	// Save the starting position of the identifier.
 	_, pos = s.r.read()
 	s.r.unread()
@@ -161,10 +216,11 @@ func (s *Scanner) scanIdent() (tok Token, pos Pos, lit string) {
 	lit = buf.String()
 
 	// If the literal matches a keyword then return that keyword.
-	if tok = Lookup(lit); tok != IDENT {
-		return tok, pos, ""
+	if lookup {
+		if tok = Lookup(lit); tok != IDENT {
+			return tok, pos, ""
+		}
 	}
-
 	return IDENT, pos, lit
 }
 
@@ -206,30 +262,12 @@ func (s *Scanner) ScanRegex() (tok Token, pos Pos, lit string) {
 }
 
 // scanNumber consumes anything that looks like the start of a number.
-// Numbers start with a digit, full stop, plus sign or minus sign.
-// This function can return non-number tokens if a scan is a false positive.
-// For example, a minus sign followed by a letter will just return a minus sign.
 func (s *Scanner) scanNumber() (tok Token, pos Pos, lit string) {
 	var buf bytes.Buffer
 
-	// Check if the initial rune is a "+" or "-".
+	// Check if the initial rune is a ".".
 	ch, pos := s.r.curr()
-	if ch == '+' || ch == '-' {
-		// Peek at the next two runes.
-		ch1, _ := s.r.read()
-		ch2, _ := s.r.read()
-		s.r.unread()
-		s.r.unread()
-
-		// This rune must be followed by a digit or a full stop and a digit.
-		if isDigit(ch1) || (ch1 == '.' && isDigit(ch2)) {
-			_, _ = buf.WriteRune(ch)
-		} else if ch == '+' {
-			return ADD, pos, ""
-		} else if ch == '-' {
-			return SUB, pos, ""
-		}
-	} else if ch == '.' {
+	if ch == '.' {
 		// Peek and see if the next rune is a digit.
 		ch1, _ := s.r.read()
 		s.r.unread()
@@ -263,26 +301,37 @@ func (s *Scanner) scanNumber() (tok Token, pos Pos, lit string) {
 
 	// Read as a duration or integer if it doesn't have a fractional part.
 	if !isDecimal {
-		// If the next rune is a duration unit (u,µ,ms,s) then return a duration token
-		if ch0, _ := s.r.read(); ch0 == 'u' || ch0 == 'µ' || ch0 == 's' || ch0 == 'h' || ch0 == 'd' || ch0 == 'w' {
+		// If the next rune is a letter then this is a duration token.
+		if ch0, _ := s.r.read(); isLetter(ch0) || ch0 == 'µ' {
 			_, _ = buf.WriteRune(ch0)
-			return DURATIONVAL, pos, buf.String()
-		} else if ch0 == 'm' {
-			_, _ = buf.WriteRune(ch0)
-			if ch1, _ := s.r.read(); ch1 == 's' {
+			for {
+				ch1, _ := s.r.read()
+				if !isLetter(ch1) && ch1 != 'µ' {
+					s.r.unread()
+					break
+				}
 				_, _ = buf.WriteRune(ch1)
-			} else {
-				s.r.unread()
+			}
+
+			// Continue reading digits and letters as part of this token.
+			for {
+				if ch0, _ := s.r.read(); isLetter(ch0) || ch0 == 'µ' || isDigit(ch0) {
+					_, _ = buf.WriteRune(ch0)
+				} else {
+					s.r.unread()
+					break
+				}
 			}
 			return DURATIONVAL, pos, buf.String()
+		} else {
+			s.r.unread()
+			return INTEGER, pos, buf.String()
 		}
-		s.r.unread()
-		return INTEGER, pos, buf.String()
 	}
 	return NUMBER, pos, buf.String()
 }
 
-// scanDigits consume a contiguous series of digits.
+// scanDigits consumes a contiguous series of digits.
 func (s *Scanner) scanDigits() string {
 	var buf bytes.Buffer
 	for {
@@ -542,7 +591,6 @@ func ScanString(r io.RuneScanner) (string, error) {
 
 var errBadString = errors.New("bad string")
 var errBadEscape = errors.New("bad escape")
-var errBadRegex = errors.New("bad regex")
 
 // ScanBareIdent reads bare identifier from a rune reader.
 func ScanBareIdent(r io.RuneScanner) string {
@@ -563,16 +611,7 @@ func ScanBareIdent(r io.RuneScanner) string {
 	return buf.String()
 }
 
-var errInvalidIdentifier = errors.New("invalid identifier")
-
 // IsRegexOp returns true if the operator accepts a regex operand.
 func IsRegexOp(t Token) bool {
 	return (t == EQREGEX || t == NEQREGEX)
-}
-
-// assert will panic with a given formatted message if the given condition is false.
-func assert(condition bool, msg string, v ...interface{}) {
-	if !condition {
-		panic(fmt.Sprintf("assert failed: "+msg, v...))
-	}
 }

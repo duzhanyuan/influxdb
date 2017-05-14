@@ -1,6 +1,6 @@
 ### Directions
 _GitHub Issues are reserved for actionable bug reports and feature requests._
-_General questions should be sent to the [InfluxDB mailing list](https://groups.google.com/forum/#!forum/influxdb)._
+_General questions should be sent to the [InfluxDB Community Site](https://community.influxdata.com)._
 
 _Before opening an issue, search for similar bug reports or feature requests on GitHub Issues._
 _If no similar issue can be found, fill out either the "Bug Report" or the "Feature Request" section below.
@@ -21,6 +21,21 @@ __Expected behavior:__ [What you expected to happen]
 __Actual behavior:__ [What actually happened]
 
 __Additional info:__ [Include gist of relevant config, logs, etc.]
+
+Also, if this is an issue of for performance, locking, etc the following commands are useful to create debug information for the team.
+
+```
+curl -o block.txt "http://localhost:8086/debug/pprof/block?debug=1" 
+curl -o goroutine.txt "http://localhost:8086/debug/pprof/goroutine?debug=1" 
+curl -o heap.txt "http://localhost:8086/debug/pprof/heap?debug=1" 
+curl -o vars.txt "http://localhost:8086/debug/vars" 
+iostat -xd 1 30 > iostat.txt
+influx -execute "show shards" > shards.txt
+influx -execute "show stats" > stats.txt
+influx -execute "show diagnostics" > diagnostics.txt
+```
+
+Please run those if possible and link them from a [gist](http://gist.github.com).
 
 *Please note, the quickest way to fix a bug is to open a Pull Request.*
 

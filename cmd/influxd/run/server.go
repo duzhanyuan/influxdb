@@ -16,14 +16,25 @@ import (
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/monitor"
+	"github.com/influxdata/influxdb/services/collectd"
+	"github.com/influxdata/influxdb/services/continuous_querier"
+	"github.com/influxdata/influxdb/services/graphite"
+	"github.com/influxdata/influxdb/services/httpd"
 	"github.com/influxdata/influxdb/services/meta"
+	"github.com/influxdata/influxdb/services/opentsdb"
+	"github.com/influxdata/influxdb/services/precreator"
+	"github.com/influxdata/influxdb/services/retention"
 	"github.com/influxdata/influxdb/services/snapshotter"
 	"github.com/influxdata/influxdb/services/subscriber"
+	"github.com/influxdata/influxdb/services/udp"
 	"github.com/influxdata/influxdb/tcp"
 	"github.com/influxdata/influxdb/tsdb"
 	client "github.com/influxdata/usage-client/v1"
-	// Initialize the engine packages
+	"github.com/uber-go/zap"
+
+	// Initialize the engine & index packages
 	_ "github.com/influxdata/influxdb/tsdb/engine"
+	_ "github.com/influxdata/influxdb/tsdb/index"
 )
 
 var startTime time.Time
@@ -52,7 +63,7 @@ type Server struct {
 	BindAddress string
 	Listener    net.Listener
 
-	Logger *log.Logger
+	Logger zap.Logger
 
 	MetaClient *meta.Client
 
@@ -85,10 +96,6 @@ type Server struct {
 	tcpAddr string
 
 	config *Config
-
-	// logOutput is the writer to which all services should be configured to
-	// write logs to after appension.
-	logOutput io.Writer
 }
 
 // NewServer returns a new instance of Server built from a config.
@@ -134,11 +141,12 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 
 		BindAddress: bind,
 
-		Logger: log.New(os.Stderr, "", log.LstdFlags),
+		Logger: zap.New(
+			zap.NewTextEncoder(),
+			zap.Output(os.Stderr),
+		),
 
 		MetaClient: meta.NewClient(c.Meta),
-
-		Monitor: monitor.New(c.Monitor),
 
 		reportingDisabled: c.ReportingDisabled,
 
@@ -146,9 +154,10 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 		httpUseTLS:  c.HTTPD.HTTPSEnabled,
 		tcpAddr:     bind,
 
-		config:    c,
-		logOutput: os.Stderr,
+		config: c,
 	}
+	s.Monitor = monitor.New(s, c.Monitor)
+	s.config.registerDiagnostics(s.Monitor)
 
 	if err := s.MetaClient.Open(); err != nil {
 		return nil, err
@@ -159,6 +168,7 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 
 	// Copy TSDB configuration.
 	s.TSDBStore.EngineOptions.EngineVersion = c.Data.Engine
+	s.TSDBStore.EngineOptions.IndexVersion = c.Data.Index
 
 	// Create the Subscriber service
 	s.Subscriber = subscriber.NewService(c.Subscriber)
@@ -172,17 +182,22 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 	// Initialize query executor.
 	s.QueryExecutor = influxql.NewQueryExecutor()
 	s.QueryExecutor.StatementExecutor = &coordinator.StatementExecutor{
-		MetaClient:        s.MetaClient,
-		TSDBStore:         coordinator.LocalTSDBStore{Store: s.TSDBStore},
+		MetaClient:  s.MetaClient,
+		TaskManager: s.QueryExecutor.TaskManager,
+		TSDBStore:   coordinator.LocalTSDBStore{Store: s.TSDBStore},
+		ShardMapper: &coordinator.LocalShardMapper{
+			MetaClient: s.MetaClient,
+			TSDBStore:  coordinator.LocalTSDBStore{Store: s.TSDBStore},
+		},
 		Monitor:           s.Monitor,
 		PointsWriter:      s.PointsWriter,
 		MaxSelectPointN:   c.Coordinator.MaxSelectPointN,
 		MaxSelectSeriesN:  c.Coordinator.MaxSelectSeriesN,
 		MaxSelectBucketsN: c.Coordinator.MaxSelectBucketsN,
 	}
-	s.QueryExecutor.QueryTimeout = time.Duration(c.Coordinator.QueryTimeout)
-	s.QueryExecutor.LogQueriesAfter = time.Duration(c.Coordinator.LogQueriesAfter)
-	s.QueryExecutor.MaxConcurrentQueries = c.Coordinator.MaxConcurrentQueries
+	s.QueryExecutor.TaskManager.QueryTimeout = time.Duration(c.Coordinator.QueryTimeout)
+	s.QueryExecutor.TaskManager.LogQueriesAfter = time.Duration(c.Coordinator.LogQueriesAfter)
+	s.QueryExecutor.TaskManager.MaxConcurrentQueries = c.Coordinator.MaxConcurrentQueries
 
 	// Initialize the monitor
 	s.Monitor.Version = s.buildInfo.Version
@@ -191,6 +206,21 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 	s.Monitor.BuildTime = s.buildInfo.Time
 	s.Monitor.PointsWriter = (*monitorPointsWriter)(s.PointsWriter)
 	return s, nil
+}
+
+// Statistics returns statistics for the services running in the Server.
+func (s *Server) Statistics(tags map[string]string) []models.Statistic {
+	var statistics []models.Statistic
+	statistics = append(statistics, s.QueryExecutor.Statistics(tags)...)
+	statistics = append(statistics, s.TSDBStore.Statistics(tags)...)
+	statistics = append(statistics, s.PointsWriter.Statistics(tags)...)
+	statistics = append(statistics, s.Subscriber.Statistics(tags)...)
+	for _, srv := range s.Services {
+		if m, ok := srv.(monitor.Reporter); ok {
+			statistics = append(statistics, m.Statistics(tags)...)
+		}
+	}
+	return statistics
 }
 
 func (s *Server) appendSnapshotterService() {
@@ -204,8 +234,111 @@ func (s *Server) appendSnapshotterService() {
 // SetLogOutput sets the logger used for all messages. It must not be called
 // after the Open method has been called.
 func (s *Server) SetLogOutput(w io.Writer) {
-	s.Logger = log.New(os.Stderr, "", log.LstdFlags)
-	s.logOutput = w
+	s.Logger = zap.New(zap.NewTextEncoder(), zap.Output(zap.AddSync(w)))
+}
+
+func (s *Server) appendMonitorService() {
+	s.Services = append(s.Services, s.Monitor)
+}
+
+func (s *Server) appendRetentionPolicyService(c retention.Config) {
+	if !c.Enabled {
+		return
+	}
+	srv := retention.NewService(c)
+	srv.MetaClient = s.MetaClient
+	srv.TSDBStore = s.TSDBStore
+	s.Services = append(s.Services, srv)
+}
+
+func (s *Server) appendHTTPDService(c httpd.Config) {
+	if !c.Enabled {
+		return
+	}
+	srv := httpd.NewService(c)
+	srv.Handler.MetaClient = s.MetaClient
+	srv.Handler.QueryAuthorizer = meta.NewQueryAuthorizer(s.MetaClient)
+	srv.Handler.WriteAuthorizer = meta.NewWriteAuthorizer(s.MetaClient)
+	srv.Handler.QueryExecutor = s.QueryExecutor
+	srv.Handler.Monitor = s.Monitor
+	srv.Handler.PointsWriter = s.PointsWriter
+	srv.Handler.Version = s.buildInfo.Version
+
+	s.Services = append(s.Services, srv)
+}
+
+func (s *Server) appendCollectdService(c collectd.Config) {
+	if !c.Enabled {
+		return
+	}
+	srv := collectd.NewService(c)
+	srv.MetaClient = s.MetaClient
+	srv.PointsWriter = s.PointsWriter
+	s.Services = append(s.Services, srv)
+}
+
+func (s *Server) appendOpenTSDBService(c opentsdb.Config) error {
+	if !c.Enabled {
+		return nil
+	}
+	srv, err := opentsdb.NewService(c)
+	if err != nil {
+		return err
+	}
+	srv.PointsWriter = s.PointsWriter
+	srv.MetaClient = s.MetaClient
+	s.Services = append(s.Services, srv)
+	return nil
+}
+
+func (s *Server) appendGraphiteService(c graphite.Config) error {
+	if !c.Enabled {
+		return nil
+	}
+	srv, err := graphite.NewService(c)
+	if err != nil {
+		return err
+	}
+
+	srv.PointsWriter = s.PointsWriter
+	srv.MetaClient = s.MetaClient
+	srv.Monitor = s.Monitor
+	s.Services = append(s.Services, srv)
+	return nil
+}
+
+func (s *Server) appendPrecreatorService(c precreator.Config) error {
+	if !c.Enabled {
+		return nil
+	}
+	srv, err := precreator.NewService(c)
+	if err != nil {
+		return err
+	}
+
+	srv.MetaClient = s.MetaClient
+	s.Services = append(s.Services, srv)
+	return nil
+}
+
+func (s *Server) appendUDPService(c udp.Config) {
+	if !c.Enabled {
+		return
+	}
+	srv := udp.NewService(c)
+	srv.PointsWriter = s.PointsWriter
+	srv.MetaClient = s.MetaClient
+	s.Services = append(s.Services, srv)
+}
+
+func (s *Server) appendContinuousQueryService(c continuous_querier.Config) {
+	if !c.Enabled {
+		return
+	}
+	srv := continuous_querier.NewService(c)
+	srv.MetaClient = s.MetaClient
+	srv.QueryExecutor = s.QueryExecutor
+	s.Services = append(s.Services, srv)
 }
 
 // Err returns an error channel that multiplexes all out of band errors received from all services.
@@ -231,7 +364,6 @@ func (s *Server) Open() error {
 	s.appendMonitorService()
 	s.appendPrecreatorService(s.config.Precreator)
 	s.appendSnapshotterService()
-	s.appendAdminService(s.config.Admin)
 	s.appendContinuousQueryService(s.config.ContinuousQuery)
 	s.appendHTTPDService(s.config.HTTPD)
 	s.appendRetentionPolicyService(s.config.Retention)
@@ -260,19 +392,20 @@ func (s *Server) Open() error {
 	s.SnapshotterService.Listener = mux.Listen(snapshotter.MuxHeader)
 
 	// Configure logging for all services and clients.
-	w := s.logOutput
-	s.MetaClient.SetLogOutput(w)
-	s.TSDBStore.SetLogOutput(w)
+	if s.config.Meta.LoggingEnabled {
+		s.MetaClient.WithLogger(s.Logger)
+	}
+	s.TSDBStore.WithLogger(s.Logger)
 	if s.config.Data.QueryLogEnabled {
-		s.QueryExecutor.SetLogOutput(w)
+		s.QueryExecutor.WithLogger(s.Logger)
 	}
-	s.PointsWriter.SetLogOutput(w)
-	s.Subscriber.SetLogOutput(w)
+	s.PointsWriter.WithLogger(s.Logger)
+	s.Subscriber.WithLogger(s.Logger)
 	for _, svc := range s.Services {
-		svc.SetLogOutput(w)
+		svc.WithLogger(s.Logger)
 	}
-	s.SnapshotterService.SetLogOutput(w)
-	s.Monitor.SetLogOutput(w)
+	s.SnapshotterService.WithLogger(s.Logger)
+	s.Monitor.WithLogger(s.Logger)
 
 	// Open TSDB store.
 	if err := s.TSDBStore.Open(); err != nil {
@@ -318,6 +451,8 @@ func (s *Server) Close() error {
 		service.Close()
 	}
 
+	s.config.deregisterDiagnostics(s.Monitor)
+
 	if s.PointsWriter != nil {
 		s.PointsWriter.Close()
 	}
@@ -345,36 +480,44 @@ func (s *Server) Close() error {
 
 // startServerReporting starts periodic server reporting.
 func (s *Server) startServerReporting() {
+	s.reportServer()
+
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-s.closing:
 			return
-		default:
+		case <-ticker.C:
+			s.reportServer()
 		}
-		s.reportServer()
-		<-time.After(24 * time.Hour)
 	}
 }
 
-// reportServer reports anonymous statistics about the system.
+// reportServer reports usage statistics about the system.
 func (s *Server) reportServer() {
-	dis := s.MetaClient.Databases()
-	numDatabases := len(dis)
+	dbs := s.MetaClient.Databases()
+	numDatabases := len(dbs)
 
-	numMeasurements := 0
-	numSeries := 0
+	var (
+		numMeasurements int64
+		numSeries       int64
+	)
 
-	// Only needed in the case of a data node
-	if s.TSDBStore != nil {
-		for _, di := range dis {
-			d := s.TSDBStore.DatabaseIndex(di.Name)
-			if d == nil {
-				// No data in this store for this database.
-				continue
-			}
-			m, s := d.MeasurementSeriesCounts()
-			numMeasurements += m
-			numSeries += s
+	for _, db := range dbs {
+		name := db.Name
+		n, err := s.TSDBStore.SeriesCardinality(name)
+		if err != nil {
+			s.Logger.Error(fmt.Sprintf("Unable to get series cardinality for database %s: %v", name, err))
+		} else {
+			numSeries += n
+		}
+
+		n, err = s.TSDBStore.MeasurementsCardinality(name)
+		if err != nil {
+			s.Logger.Error(fmt.Sprintf("Unable to get measurement cardinality for database %s: %v", name, err))
+		} else {
+			numMeasurements += n
 		}
 	}
 
@@ -398,44 +541,14 @@ func (s *Server) reportServer() {
 		},
 	}
 
-	s.Logger.Printf("Sending anonymous usage statistics to m.influxdb.com")
+	s.Logger.Info("Sending usage statistics to usage.influxdata.com")
 
 	go cl.Save(usage)
 }
 
-// monitorErrorChan reads an error channel and resends it through the server.
-func (s *Server) monitorErrorChan(ch <-chan error) {
-	for {
-		select {
-		case err, ok := <-ch:
-			if !ok {
-				return
-			}
-			s.err <- err
-		case <-s.closing:
-			return
-		}
-	}
-}
-
-// HTTPAddr returns the HTTP address used by other nodes for HTTP queries and writes.
-func (s *Server) HTTPAddr() string {
-	return s.remoteAddr(s.httpAPIAddr)
-}
-
-// TCPAddr returns the TCP address used by other nodes for cluster communication.
-func (s *Server) TCPAddr() string {
-	return s.remoteAddr(s.tcpAddr)
-}
-
-// MetaServers returns the meta node HTTP addresses used by this server.
-func (s *Server) MetaServers() []string {
-	return []string{s.HTTPAddr()}
-}
-
 // Service represents a service attached to the server.
 type Service interface {
-	SetLogOutput(w io.Writer)
+	WithLogger(log zap.Logger)
 	Open() error
 	Close() error
 }
@@ -484,11 +597,6 @@ func stopProfile() {
 	}
 }
 
-type tcpaddr struct{ host string }
-
-func (a *tcpaddr) Network() string { return "tcp" }
-func (a *tcpaddr) String() string  { return a.host }
-
 // monitorPointsWriter is a wrapper around `coordinator.PointsWriter` that helps
 // to prevent a circular dependency between the `cluster` and `monitor` packages.
 type monitorPointsWriter coordinator.PointsWriter
@@ -497,23 +605,12 @@ func (pw *monitorPointsWriter) WritePoints(database, retentionPolicy string, poi
 	return (*coordinator.PointsWriter)(pw).WritePoints(database, retentionPolicy, models.ConsistencyLevelAny, points)
 }
 
-func (s *Server) remoteAddr(addr string) string {
-	hostname := s.config.Hostname
-	remote, err := DefaultHost(hostname, addr)
-	if err != nil {
-		return addr
+func raftDBExists(dir string) error {
+	// Check to see if there is a raft db, if so, error out with a message
+	// to downgrade, export, and then import the meta data
+	raftFile := filepath.Join(dir, "raft.db")
+	if _, err := os.Stat(raftFile); err == nil {
+		return fmt.Errorf("detected %s. To proceed, you'll need to either 1) downgrade to v0.11.x, export your metadata, upgrade to the current version again, and then import the metadata or 2) delete the file, which will effectively reset your database. For more assistance with the upgrade, see: https://docs.influxdata.com/influxdb/v0.12/administration/upgrading/", raftFile)
 	}
-	return remote
-}
-
-func DefaultHost(hostname, addr string) (string, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", err
-	}
-
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		return net.JoinHostPort(hostname, port), nil
-	}
-	return addr, nil
+	return nil
 }

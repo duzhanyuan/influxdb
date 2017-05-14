@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
-	"math/rand"
 	"reflect"
-	"regexp"
 	"testing"
 	"time"
 
@@ -39,7 +37,8 @@ func TestMergeIterator_Float(t *testing.T) {
 		Interval: influxql.Interval{
 			Duration: 10 * time.Nanosecond,
 		},
-		Ascending: true,
+		Dimensions: []string{"host"},
+		Ascending:  true,
 	})
 	if a, err := Iterators([]influxql.Iterator{itr}).ReadAll(); err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -86,7 +85,8 @@ func TestMergeIterator_Integer(t *testing.T) {
 		Interval: influxql.Interval{
 			Duration: 10 * time.Nanosecond,
 		},
-		Ascending: true,
+		Dimensions: []string{"host"},
+		Ascending:  true,
 	})
 
 	if a, err := Iterators([]influxql.Iterator{itr}).ReadAll(); err != nil {
@@ -134,7 +134,8 @@ func TestMergeIterator_String(t *testing.T) {
 		Interval: influxql.Interval{
 			Duration: 10 * time.Nanosecond,
 		},
-		Ascending: true,
+		Dimensions: []string{"host"},
+		Ascending:  true,
 	})
 
 	if a, err := Iterators([]influxql.Iterator{itr}).ReadAll(); err != nil {
@@ -182,7 +183,8 @@ func TestMergeIterator_Boolean(t *testing.T) {
 		Interval: influxql.Interval{
 			Duration: 10 * time.Nanosecond,
 		},
-		Ascending: true,
+		Dimensions: []string{"host"},
+		Ascending:  true,
 	})
 
 	if a, err := Iterators([]influxql.Iterator{itr}).ReadAll(); err != nil {
@@ -236,7 +238,8 @@ func TestMergeIterator_Cast_Float(t *testing.T) {
 		Interval: influxql.Interval{
 			Duration: 10 * time.Nanosecond,
 		},
-		Ascending: true,
+		Dimensions: []string{"host"},
+		Ascending:  true,
 	})
 	if a, err := Iterators([]influxql.Iterator{itr}).ReadAll(); err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -290,7 +293,8 @@ func TestSortedMergeIterator_Float(t *testing.T) {
 		Interval: influxql.Interval{
 			Duration: 10 * time.Nanosecond,
 		},
-		Ascending: true,
+		Dimensions: []string{"host"},
+		Ascending:  true,
 	})
 	if a, err := Iterators([]influxql.Iterator{itr}).ReadAll(); err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -337,7 +341,8 @@ func TestSortedMergeIterator_Integer(t *testing.T) {
 		Interval: influxql.Interval{
 			Duration: 10 * time.Nanosecond,
 		},
-		Ascending: true,
+		Dimensions: []string{"host"},
+		Ascending:  true,
 	})
 	if a, err := Iterators([]influxql.Iterator{itr}).ReadAll(); err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -384,7 +389,8 @@ func TestSortedMergeIterator_String(t *testing.T) {
 		Interval: influxql.Interval{
 			Duration: 10 * time.Nanosecond,
 		},
-		Ascending: true,
+		Dimensions: []string{"host"},
+		Ascending:  true,
 	})
 	if a, err := Iterators([]influxql.Iterator{itr}).ReadAll(); err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -431,7 +437,8 @@ func TestSortedMergeIterator_Boolean(t *testing.T) {
 		Interval: influxql.Interval{
 			Duration: 10 * time.Nanosecond,
 		},
-		Ascending: true,
+		Dimensions: []string{"host"},
+		Ascending:  true,
 	})
 	if a, err := Iterators([]influxql.Iterator{itr}).ReadAll(); err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -484,7 +491,8 @@ func TestSortedMergeIterator_Cast_Float(t *testing.T) {
 		Interval: influxql.Interval{
 			Duration: 10 * time.Nanosecond,
 		},
-		Ascending: true,
+		Dimensions: []string{"host"},
+		Ascending:  true,
 	})
 	if a, err := Iterators([]influxql.Iterator{itr}).ReadAll(); err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -697,6 +705,238 @@ func TestLimitIterator(t *testing.T) {
 	}
 }
 
+func TestFillIterator_DST_Start_GroupByDay_Ascending(t *testing.T) {
+	start := time.Date(2000, 4, 1, 0, 0, 0, 0, LosAngeles)
+	end := time.Date(2000, 4, 5, 0, 0, 0, 0, LosAngeles).Add(-time.Nanosecond)
+	itr := influxql.NewFillIterator(
+		&FloatIterator{Points: []influxql.FloatPoint{{Time: start.UnixNano(), Value: 0}}},
+		nil,
+		influxql.IteratorOptions{
+			StartTime: start.UnixNano(),
+			EndTime:   end.UnixNano(),
+			Interval: influxql.Interval{
+				Duration: 24 * time.Hour,
+			},
+			Location:  LosAngeles,
+			Ascending: true,
+		},
+	)
+
+	if a, err := (Iterators{itr}).ReadAll(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	} else if !deep.Equal(a, [][]influxql.Point{
+		{&influxql.FloatPoint{Time: start.UnixNano(), Value: 0}},
+		{&influxql.FloatPoint{Time: start.Add(24 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(47 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(71 * time.Hour).UnixNano(), Nil: true}},
+	}) {
+		t.Fatalf("unexpected points: %s", spew.Sdump(a))
+	}
+}
+
+func TestFillIterator_DST_Start_GroupByDay_Descending(t *testing.T) {
+	start := time.Date(2000, 4, 1, 0, 0, 0, 0, LosAngeles)
+	end := time.Date(2000, 4, 5, 0, 0, 0, 0, LosAngeles).Add(-time.Nanosecond)
+	itr := influxql.NewFillIterator(
+		&FloatIterator{Points: []influxql.FloatPoint{{Time: start.UnixNano(), Value: 0}}},
+		nil,
+		influxql.IteratorOptions{
+			StartTime: start.UnixNano(),
+			EndTime:   end.UnixNano(),
+			Interval: influxql.Interval{
+				Duration: 24 * time.Hour,
+			},
+			Location:  LosAngeles,
+			Ascending: false,
+		},
+	)
+
+	if a, err := (Iterators{itr}).ReadAll(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	} else if !deep.Equal(a, [][]influxql.Point{
+		{&influxql.FloatPoint{Time: start.Add(71 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(47 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(24 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.UnixNano(), Value: 0}},
+	}) {
+		t.Fatalf("unexpected points: %s", spew.Sdump(a))
+	}
+}
+
+func TestFillIterator_DST_Start_GroupByHour_Ascending(t *testing.T) {
+	start := time.Date(2000, 4, 2, 0, 0, 0, 0, LosAngeles)
+	end := start.Add(4*time.Hour - time.Nanosecond)
+	itr := influxql.NewFillIterator(
+		&FloatIterator{Points: []influxql.FloatPoint{{Time: start.UnixNano(), Value: 0}}},
+		nil,
+		influxql.IteratorOptions{
+			StartTime: start.UnixNano(),
+			EndTime:   end.UnixNano(),
+			Interval: influxql.Interval{
+				Duration: time.Hour,
+			},
+			Location:  LosAngeles,
+			Ascending: true,
+		},
+	)
+
+	if a, err := (Iterators{itr}).ReadAll(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	} else if !deep.Equal(a, [][]influxql.Point{
+		{&influxql.FloatPoint{Time: start.UnixNano(), Value: 0}},
+		{&influxql.FloatPoint{Time: start.Add(1 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(2 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(3 * time.Hour).UnixNano(), Nil: true}},
+	}) {
+		t.Fatalf("unexpected points: %s", spew.Sdump(a))
+	}
+}
+
+func TestFillIterator_DST_Start_GroupByHour_Descending(t *testing.T) {
+	start := time.Date(2000, 4, 2, 0, 0, 0, 0, LosAngeles)
+	end := start.Add(4*time.Hour - time.Nanosecond)
+	itr := influxql.NewFillIterator(
+		&FloatIterator{Points: []influxql.FloatPoint{{Time: start.UnixNano(), Value: 0}}},
+		nil,
+		influxql.IteratorOptions{
+			StartTime: start.UnixNano(),
+			EndTime:   end.UnixNano(),
+			Interval: influxql.Interval{
+				Duration: time.Hour,
+			},
+			Location:  LosAngeles,
+			Ascending: false,
+		},
+	)
+
+	if a, err := (Iterators{itr}).ReadAll(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	} else if !deep.Equal(a, [][]influxql.Point{
+		{&influxql.FloatPoint{Time: start.Add(3 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(2 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(1 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.UnixNano(), Value: 0}},
+	}) {
+		t.Fatalf("unexpected points: %s", spew.Sdump(a))
+	}
+}
+
+func TestFillIterator_DST_End_GroupByDay_Ascending(t *testing.T) {
+	start := time.Date(2000, 10, 28, 0, 0, 0, 0, LosAngeles)
+	end := time.Date(2000, 11, 1, 0, 0, 0, 0, LosAngeles).Add(-time.Nanosecond)
+	itr := influxql.NewFillIterator(
+		&FloatIterator{Points: []influxql.FloatPoint{{Time: start.UnixNano(), Value: 0}}},
+		nil,
+		influxql.IteratorOptions{
+			StartTime: start.UnixNano(),
+			EndTime:   end.UnixNano(),
+			Interval: influxql.Interval{
+				Duration: 24 * time.Hour,
+			},
+			Location:  LosAngeles,
+			Ascending: true,
+		},
+	)
+
+	if a, err := (Iterators{itr}).ReadAll(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	} else if !deep.Equal(a, [][]influxql.Point{
+		{&influxql.FloatPoint{Time: start.UnixNano(), Value: 0}},
+		{&influxql.FloatPoint{Time: start.Add(24 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(49 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(73 * time.Hour).UnixNano(), Nil: true}},
+	}) {
+		t.Fatalf("unexpected points: %s", spew.Sdump(a))
+	}
+}
+
+func TestFillIterator_DST_End_GroupByDay_Descending(t *testing.T) {
+	start := time.Date(2000, 10, 28, 0, 0, 0, 0, LosAngeles)
+	end := time.Date(2000, 11, 1, 0, 0, 0, 0, LosAngeles).Add(-time.Nanosecond)
+	itr := influxql.NewFillIterator(
+		&FloatIterator{Points: []influxql.FloatPoint{{Time: start.UnixNano(), Value: 0}}},
+		nil,
+		influxql.IteratorOptions{
+			StartTime: start.UnixNano(),
+			EndTime:   end.UnixNano(),
+			Interval: influxql.Interval{
+				Duration: 24 * time.Hour,
+			},
+			Location:  LosAngeles,
+			Ascending: false,
+		},
+	)
+
+	if a, err := (Iterators{itr}).ReadAll(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	} else if !deep.Equal(a, [][]influxql.Point{
+		{&influxql.FloatPoint{Time: start.Add(73 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(49 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(24 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.UnixNano(), Value: 0}},
+	}) {
+		t.Fatalf("unexpected points: %s", spew.Sdump(a))
+	}
+}
+
+func TestFillIterator_DST_End_GroupByHour_Ascending(t *testing.T) {
+	start := time.Date(2000, 10, 29, 0, 0, 0, 0, LosAngeles)
+	end := start.Add(4*time.Hour - time.Nanosecond)
+	itr := influxql.NewFillIterator(
+		&FloatIterator{Points: []influxql.FloatPoint{{Time: start.UnixNano(), Value: 0}}},
+		nil,
+		influxql.IteratorOptions{
+			StartTime: start.UnixNano(),
+			EndTime:   end.UnixNano(),
+			Interval: influxql.Interval{
+				Duration: time.Hour,
+			},
+			Location:  LosAngeles,
+			Ascending: true,
+		},
+	)
+
+	if a, err := (Iterators{itr}).ReadAll(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	} else if !deep.Equal(a, [][]influxql.Point{
+		{&influxql.FloatPoint{Time: start.UnixNano(), Value: 0}},
+		{&influxql.FloatPoint{Time: start.Add(1 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(2 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(3 * time.Hour).UnixNano(), Nil: true}},
+	}) {
+		t.Fatalf("unexpected points: %s", spew.Sdump(a))
+	}
+}
+
+func TestFillIterator_DST_End_GroupByHour_Descending(t *testing.T) {
+	start := time.Date(2000, 10, 29, 0, 0, 0, 0, LosAngeles)
+	end := start.Add(4*time.Hour - time.Nanosecond)
+	itr := influxql.NewFillIterator(
+		&FloatIterator{Points: []influxql.FloatPoint{{Time: start.UnixNano(), Value: 0}}},
+		nil,
+		influxql.IteratorOptions{
+			StartTime: start.UnixNano(),
+			EndTime:   end.UnixNano(),
+			Interval: influxql.Interval{
+				Duration: time.Hour,
+			},
+			Location:  LosAngeles,
+			Ascending: false,
+		},
+	)
+
+	if a, err := (Iterators{itr}).ReadAll(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	} else if !deep.Equal(a, [][]influxql.Point{
+		{&influxql.FloatPoint{Time: start.Add(3 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(2 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.Add(1 * time.Hour).UnixNano(), Nil: true}},
+		{&influxql.FloatPoint{Time: start.UnixNano(), Value: 0}},
+	}) {
+		t.Fatalf("unexpected points: %s", spew.Sdump(a))
+	}
+}
+
 // Iterators is a test wrapper for iterators.
 type Iterators []influxql.Iterator
 
@@ -806,6 +1046,65 @@ func TestIteratorOptions_Window_Default(t *testing.T) {
 	}
 }
 
+func TestIteratorOptions_Window_Location(t *testing.T) {
+	now := time.Date(2000, 4, 2, 12, 14, 15, 0, LosAngeles)
+	opt := influxql.IteratorOptions{
+		Location: LosAngeles,
+		Interval: influxql.Interval{
+			Duration: 24 * time.Hour,
+		},
+	}
+
+	start, end := opt.Window(now.UnixNano())
+	if exp := time.Date(2000, 4, 2, 0, 0, 0, 0, LosAngeles).UnixNano(); start != exp {
+		t.Errorf("expected start to be %d, got %d", exp, start)
+	}
+	if exp := time.Date(2000, 4, 3, 0, 0, 0, 0, LosAngeles).UnixNano(); end != exp {
+		t.Errorf("expected end to be %d, got %d", exp, end)
+	}
+	if got, exp := time.Duration(end-start), 23*time.Hour; got != exp {
+		t.Errorf("expected duration to be %s, got %s", exp, got)
+	}
+}
+
+func TestIteratorOptions_Window_MinTime(t *testing.T) {
+	opt := influxql.IteratorOptions{
+		StartTime: influxql.MinTime,
+		EndTime:   influxql.MaxTime,
+		Interval: influxql.Interval{
+			Duration: time.Hour,
+		},
+	}
+	expected := time.Unix(0, influxql.MinTime).Add(time.Hour).Truncate(time.Hour)
+
+	start, end := opt.Window(influxql.MinTime)
+	if start != influxql.MinTime {
+		t.Errorf("expected start to be %d, got %d", influxql.MinTime, start)
+	}
+	if have, want := end, expected.UnixNano(); have != want {
+		t.Errorf("expected end to be %d, got %d", want, have)
+	}
+}
+
+func TestIteratorOptions_Window_MaxTime(t *testing.T) {
+	opt := influxql.IteratorOptions{
+		StartTime: influxql.MinTime,
+		EndTime:   influxql.MaxTime,
+		Interval: influxql.Interval{
+			Duration: time.Hour,
+		},
+	}
+	expected := time.Unix(0, influxql.MaxTime).Truncate(time.Hour)
+
+	start, end := opt.Window(influxql.MaxTime)
+	if have, want := start, expected.UnixNano(); have != want {
+		t.Errorf("expected start to be %d, got %d", want, have)
+	}
+	if end != influxql.MaxTime {
+		t.Errorf("expected end to be %d, got %d", influxql.MaxTime, end)
+	}
+}
+
 func TestIteratorOptions_SeekTime_Ascending(t *testing.T) {
 	opt := influxql.IteratorOptions{
 		StartTime: 30,
@@ -829,26 +1128,6 @@ func TestIteratorOptions_SeekTime_Descending(t *testing.T) {
 	time := opt.SeekTime()
 	if time != 60 {
 		t.Errorf("expected time to be 60, got %d", time)
-	}
-}
-
-func TestIteratorOptions_MergeSorted(t *testing.T) {
-	opt := influxql.IteratorOptions{}
-	sorted := opt.MergeSorted()
-	if !sorted {
-		t.Error("expected no expression to be sorted, got unsorted")
-	}
-
-	opt.Expr = &influxql.VarRef{}
-	sorted = opt.MergeSorted()
-	if !sorted {
-		t.Error("expected expression with varref to be sorted, got unsorted")
-	}
-
-	opt.Expr = &influxql.Call{}
-	sorted = opt.MergeSorted()
-	if sorted {
-		t.Error("expected expression without varref to be unsorted, got sorted")
 	}
 }
 
@@ -940,14 +1219,20 @@ func TestIteratorOptions_ElapsedInterval_Call(t *testing.T) {
 	}
 }
 
+func TestIteratorOptions_IntegralInterval_Default(t *testing.T) {
+	opt := influxql.IteratorOptions{}
+	expected := influxql.Interval{Duration: time.Second}
+	actual := opt.IntegralInterval()
+	if actual != expected {
+		t.Errorf("expected default integral interval to be %v, got %v", expected, actual)
+	}
+}
+
 // Ensure iterator options can be marshaled to and from a binary format.
 func TestIteratorOptions_MarshalBinary(t *testing.T) {
 	opt := &influxql.IteratorOptions{
 		Expr: MustParseExpr("count(value)"),
 		Aux:  []influxql.VarRef{{Val: "a"}, {Val: "b"}, {Val: "c"}},
-		Sources: []influxql.Source{
-			&influxql.Measurement{Database: "db0", RetentionPolicy: "rp0", Name: "mm0"},
-		},
 		Interval: influxql.Interval{
 			Duration: 1 * time.Hour,
 			Offset:   20 * time.Minute,
@@ -981,53 +1266,6 @@ func TestIteratorOptions_MarshalBinary(t *testing.T) {
 	}
 }
 
-// Ensure iterator options with a regex measurement can be marshaled.
-func TestIteratorOptions_MarshalBinary_Measurement_Regex(t *testing.T) {
-	opt := &influxql.IteratorOptions{
-		Sources: []influxql.Source{
-			&influxql.Measurement{Database: "db1", RetentionPolicy: "rp2", Regex: &influxql.RegexLiteral{Val: regexp.MustCompile(`series.+`)}},
-		},
-	}
-
-	// Marshal to binary.
-	buf, err := opt.MarshalBinary()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Unmarshal back to an object.
-	var other influxql.IteratorOptions
-	if err := other.UnmarshalBinary(buf); err != nil {
-		t.Fatal(err)
-	} else if v := other.Sources[0].(*influxql.Measurement).Regex.Val.String(); v != `/series.+/` {
-		t.Fatalf("unexpected measurement regex: %s", v)
-	}
-}
-
-// Ensure series list can be marshaled into and out of a binary format.
-func TestSeriesList_MarshalBinary(t *testing.T) {
-	a := []influxql.Series{
-		{Name: "cpu", Tags: ParseTags("foo=bar"), Aux: []influxql.DataType{influxql.Float, influxql.String}},
-		{Name: "mem", Aux: []influxql.DataType{influxql.Integer}},
-		{Name: "disk"},
-		{},
-	}
-
-	// Marshal to binary.
-	buf, err := influxql.SeriesList(a).MarshalBinary()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Unmarshal back to an object.
-	var other influxql.SeriesList
-	if err := other.UnmarshalBinary(buf); err != nil {
-		t.Fatal(err)
-	} else if !reflect.DeepEqual(other, influxql.SeriesList(a)) {
-		t.Fatalf("unexpected series list: %s", spew.Sdump(other))
-	}
-}
-
 // Ensure iterator can be encoded and decoded over a byte stream.
 func TestIterator_EncodeDecode(t *testing.T) {
 	var buf bytes.Buffer
@@ -1052,10 +1290,7 @@ func TestIterator_EncodeDecode(t *testing.T) {
 	}
 
 	// Decode from the buffer.
-	dec, err := influxql.NewReaderIterator(&buf, influxql.Float, itr.Stats())
-	if err != nil {
-		t.Fatal(err)
-	}
+	dec := influxql.NewReaderIterator(&buf, influxql.Float, itr.Stats())
 
 	// Initial stats should exist immediately.
 	fdec := dec.(influxql.FloatIterator)
@@ -1083,21 +1318,31 @@ func TestIterator_EncodeDecode(t *testing.T) {
 
 // IteratorCreator is a mockable implementation of SelectStatementExecutor.IteratorCreator.
 type IteratorCreator struct {
-	CreateIteratorFn  func(opt influxql.IteratorOptions) (influxql.Iterator, error)
-	FieldDimensionsFn func(sources influxql.Sources) (fields map[string]influxql.DataType, dimensions map[string]struct{}, err error)
-	ExpandSourcesFn   func(sources influxql.Sources) (influxql.Sources, error)
+	CreateIteratorFn  func(m *influxql.Measurement, opt influxql.IteratorOptions) (influxql.Iterator, error)
+	FieldDimensionsFn func(m *influxql.Measurement) (fields map[string]influxql.DataType, dimensions map[string]struct{}, err error)
 }
 
-func (ic *IteratorCreator) CreateIterator(opt influxql.IteratorOptions) (influxql.Iterator, error) {
-	return ic.CreateIteratorFn(opt)
+func (ic *IteratorCreator) CreateIterator(m *influxql.Measurement, opt influxql.IteratorOptions) (influxql.Iterator, error) {
+	return ic.CreateIteratorFn(m, opt)
 }
 
-func (ic *IteratorCreator) FieldDimensions(sources influxql.Sources) (fields map[string]influxql.DataType, dimensions map[string]struct{}, err error) {
-	return ic.FieldDimensionsFn(sources)
+func (ic *IteratorCreator) FieldDimensions(m *influxql.Measurement) (fields map[string]influxql.DataType, dimensions map[string]struct{}, err error) {
+	return ic.FieldDimensionsFn(m)
 }
 
-func (ic *IteratorCreator) ExpandSources(sources influxql.Sources) (influxql.Sources, error) {
-	return ic.ExpandSourcesFn(sources)
+func (ic *IteratorCreator) MapType(m *influxql.Measurement, field string) influxql.DataType {
+	f, d, err := ic.FieldDimensions(m)
+	if err != nil {
+		return influxql.Unknown
+	}
+
+	if typ, ok := f[field]; ok {
+		return typ
+	}
+	if _, ok := d[field]; ok {
+		return influxql.Tag
+	}
+	return influxql.Unknown
 }
 
 // Test implementation of influxql.FloatIterator
@@ -1127,29 +1372,6 @@ func FloatIterators(inputs []*FloatIterator) []influxql.Iterator {
 		itrs[i] = influxql.Iterator(inputs[i])
 	}
 	return itrs
-}
-
-// GenerateFloatIterator creates a FloatIterator with random data.
-func GenerateFloatIterator(rand *rand.Rand, valueN int) *FloatIterator {
-	const interval = 10 * time.Second
-
-	itr := &FloatIterator{
-		Points: make([]influxql.FloatPoint, valueN),
-	}
-
-	for i := 0; i < valueN; i++ {
-		// Generate incrementing timestamp with some jitter (1s).
-		jitter := (rand.Int63n(2) * int64(time.Second))
-		timestamp := int64(i)*int64(10*time.Second) + jitter
-
-		itr.Points[i] = influxql.FloatPoint{
-			Name:  "cpu",
-			Time:  timestamp,
-			Value: rand.Float64(),
-		}
-	}
-
-	return itr
 }
 
 // Test implementation of influxql.IntegerIterator

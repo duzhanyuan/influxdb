@@ -3,6 +3,7 @@ package influxql_test
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,15 +13,15 @@ import (
 var errUnexpected = errors.New("unexpected error")
 
 type StatementExecutor struct {
-	ExecuteStatementFn func(stmt influxql.Statement, ctx *influxql.ExecutionContext) error
+	ExecuteStatementFn func(stmt influxql.Statement, ctx influxql.ExecutionContext) error
 }
 
-func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx *influxql.ExecutionContext) error {
+func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx influxql.ExecutionContext) error {
 	return e.ExecuteStatementFn(stmt, ctx)
 }
 
-func (e *StatementExecutor) NormalizeStatement(stmt influxql.Statement, database string) error {
-	return nil
+func NewQueryExecutor() *influxql.QueryExecutor {
+	return influxql.NewQueryExecutor()
 }
 
 func TestQueryExecutor_AttachQuery(t *testing.T) {
@@ -29,9 +30,9 @@ func TestQueryExecutor_AttachQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := influxql.NewQueryExecutor()
+	e := NewQueryExecutor()
 	e.StatementExecutor = &StatementExecutor{
-		ExecuteStatementFn: func(stmt influxql.Statement, ctx *influxql.ExecutionContext) error {
+		ExecuteStatementFn: func(stmt influxql.Statement, ctx influxql.ExecutionContext) error {
 			if ctx.QueryID != 1 {
 				t.Errorf("incorrect query id: exp=1 got=%d", ctx.QueryID)
 			}
@@ -39,7 +40,7 @@ func TestQueryExecutor_AttachQuery(t *testing.T) {
 		},
 	}
 
-	discardOutput(e.ExecuteQuery(q, "mydb", 100, false, nil))
+	discardOutput(e.ExecuteQuery(q, influxql.ExecutionOptions{}, nil))
 }
 
 func TestQueryExecutor_KillQuery(t *testing.T) {
@@ -50,9 +51,14 @@ func TestQueryExecutor_KillQuery(t *testing.T) {
 
 	qid := make(chan uint64)
 
-	e := influxql.NewQueryExecutor()
+	e := NewQueryExecutor()
 	e.StatementExecutor = &StatementExecutor{
-		ExecuteStatementFn: func(stmt influxql.Statement, ctx *influxql.ExecutionContext) error {
+		ExecuteStatementFn: func(stmt influxql.Statement, ctx influxql.ExecutionContext) error {
+			switch stmt.(type) {
+			case *influxql.KillQueryStatement:
+				return e.TaskManager.ExecuteStatement(stmt, ctx)
+			}
+
 			qid <- ctx.QueryID
 			select {
 			case <-ctx.InterruptCh:
@@ -64,12 +70,12 @@ func TestQueryExecutor_KillQuery(t *testing.T) {
 		},
 	}
 
-	results := e.ExecuteQuery(q, "mydb", 100, false, nil)
+	results := e.ExecuteQuery(q, influxql.ExecutionOptions{}, nil)
 	q, err = influxql.ParseQuery(fmt.Sprintf("KILL QUERY %d", <-qid))
 	if err != nil {
 		t.Fatal(err)
 	}
-	discardOutput(e.ExecuteQuery(q, "mydb", 100, false, nil))
+	discardOutput(e.ExecuteQuery(q, influxql.ExecutionOptions{}, nil))
 
 	result := <-results
 	if result.Err != influxql.ErrQueryInterrupted {
@@ -83,9 +89,9 @@ func TestQueryExecutor_Interrupt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := influxql.NewQueryExecutor()
+	e := NewQueryExecutor()
 	e.StatementExecutor = &StatementExecutor{
-		ExecuteStatementFn: func(stmt influxql.Statement, ctx *influxql.ExecutionContext) error {
+		ExecuteStatementFn: func(stmt influxql.Statement, ctx influxql.ExecutionContext) error {
 			select {
 			case <-ctx.InterruptCh:
 				return influxql.ErrQueryInterrupted
@@ -97,7 +103,7 @@ func TestQueryExecutor_Interrupt(t *testing.T) {
 	}
 
 	closing := make(chan struct{})
-	results := e.ExecuteQuery(q, "mydb", 100, false, closing)
+	results := e.ExecuteQuery(q, influxql.ExecutionOptions{}, closing)
 	close(closing)
 	result := <-results
 	if result.Err != influxql.ErrQueryInterrupted {
@@ -105,26 +111,57 @@ func TestQueryExecutor_Interrupt(t *testing.T) {
 	}
 }
 
-func TestQueryExecutor_ShowQueries(t *testing.T) {
+func TestQueryExecutor_Abort(t *testing.T) {
 	q, err := influxql.ParseQuery(`SELECT count(value) FROM cpu`)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	e := influxql.NewQueryExecutor()
+	ch1 := make(chan struct{})
+	ch2 := make(chan struct{})
+
+	e := NewQueryExecutor()
 	e.StatementExecutor = &StatementExecutor{
-		ExecuteStatementFn: func(stmt influxql.Statement, ctx *influxql.ExecutionContext) error {
+		ExecuteStatementFn: func(stmt influxql.Statement, ctx influxql.ExecutionContext) error {
+			<-ch1
+			if err := ctx.Send(&influxql.Result{Err: errUnexpected}); err != influxql.ErrQueryAborted {
+				t.Errorf("unexpected error: %v", err)
+			}
+			close(ch2)
+			return nil
+		},
+	}
+
+	done := make(chan struct{})
+	close(done)
+
+	results := e.ExecuteQuery(q, influxql.ExecutionOptions{AbortCh: done}, nil)
+	close(ch1)
+
+	<-ch2
+	discardOutput(results)
+}
+
+func TestQueryExecutor_ShowQueries(t *testing.T) {
+	e := NewQueryExecutor()
+	e.StatementExecutor = &StatementExecutor{
+		ExecuteStatementFn: func(stmt influxql.Statement, ctx influxql.ExecutionContext) error {
+			switch stmt.(type) {
+			case *influxql.ShowQueriesStatement:
+				return e.TaskManager.ExecuteStatement(stmt, ctx)
+			}
+
 			t.Errorf("unexpected statement: %s", stmt)
 			return errUnexpected
 		},
 	}
 
-	q, err = influxql.ParseQuery(`SHOW QUERIES`)
+	q, err := influxql.ParseQuery(`SHOW QUERIES`)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	results := e.ExecuteQuery(q, "", 100, false, nil)
+	results := e.ExecuteQuery(q, influxql.ExecutionOptions{}, nil)
 	result := <-results
 	if len(result.Series) != 1 {
 		t.Errorf("expected %d rows, got %d", 1, len(result.Series))
@@ -140,9 +177,9 @@ func TestQueryExecutor_Limit_Timeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := influxql.NewQueryExecutor()
+	e := NewQueryExecutor()
 	e.StatementExecutor = &StatementExecutor{
-		ExecuteStatementFn: func(stmt influxql.Statement, ctx *influxql.ExecutionContext) error {
+		ExecuteStatementFn: func(stmt influxql.Statement, ctx influxql.ExecutionContext) error {
 			select {
 			case <-ctx.InterruptCh:
 				return influxql.ErrQueryInterrupted
@@ -152,11 +189,11 @@ func TestQueryExecutor_Limit_Timeout(t *testing.T) {
 			}
 		},
 	}
-	e.QueryTimeout = time.Nanosecond
+	e.TaskManager.QueryTimeout = time.Nanosecond
 
-	results := e.ExecuteQuery(q, "mydb", 100, false, nil)
+	results := e.ExecuteQuery(q, influxql.ExecutionOptions{}, nil)
 	result := <-results
-	if result.Err != influxql.ErrQueryTimeoutReached {
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "query-timeout") {
 		t.Errorf("unexpected error: %s", result.Err)
 	}
 }
@@ -169,30 +206,30 @@ func TestQueryExecutor_Limit_ConcurrentQueries(t *testing.T) {
 
 	qid := make(chan uint64)
 
-	e := influxql.NewQueryExecutor()
+	e := NewQueryExecutor()
 	e.StatementExecutor = &StatementExecutor{
-		ExecuteStatementFn: func(stmt influxql.Statement, ctx *influxql.ExecutionContext) error {
+		ExecuteStatementFn: func(stmt influxql.Statement, ctx influxql.ExecutionContext) error {
 			qid <- ctx.QueryID
 			<-ctx.InterruptCh
 			return influxql.ErrQueryInterrupted
 		},
 	}
-	e.MaxConcurrentQueries = 1
+	e.TaskManager.MaxConcurrentQueries = 1
 	defer e.Close()
 
 	// Start first query and wait for it to be executing.
-	go discardOutput(e.ExecuteQuery(q, "mydb", 100, false, nil))
+	go discardOutput(e.ExecuteQuery(q, influxql.ExecutionOptions{}, nil))
 	<-qid
 
 	// Start second query and expect for it to fail.
-	results := e.ExecuteQuery(q, "mydb", 100, false, nil)
+	results := e.ExecuteQuery(q, influxql.ExecutionOptions{}, nil)
 
 	select {
 	case result := <-results:
 		if len(result.Series) != 0 {
 			t.Errorf("expected %d rows, got %d", 0, len(result.Series))
 		}
-		if result.Err != influxql.ErrMaxConcurrentQueriesReached {
+		if result.Err == nil || !strings.Contains(result.Err.Error(), "max-concurrent-queries") {
 			t.Errorf("unexpected error: %s", result.Err)
 		}
 	case <-qid:
@@ -209,22 +246,22 @@ func TestQueryExecutor_Close(t *testing.T) {
 	ch1 := make(chan struct{})
 	ch2 := make(chan struct{})
 
-	e := influxql.NewQueryExecutor()
+	e := NewQueryExecutor()
 	e.StatementExecutor = &StatementExecutor{
-		ExecuteStatementFn: func(stmt influxql.Statement, ctx *influxql.ExecutionContext) error {
+		ExecuteStatementFn: func(stmt influxql.Statement, ctx influxql.ExecutionContext) error {
 			close(ch1)
 			<-ctx.InterruptCh
-			close(ch2)
 			return influxql.ErrQueryInterrupted
 		},
 	}
 
-	results := e.ExecuteQuery(q, "mydb", 100, false, nil)
+	results := e.ExecuteQuery(q, influxql.ExecutionOptions{}, nil)
 	go func(results <-chan *influxql.Result) {
 		result := <-results
 		if result.Err != influxql.ErrQueryEngineShutdown {
 			t.Errorf("unexpected error: %s", result.Err)
 		}
+		close(ch2)
 	}(results)
 
 	// Wait for the statement to start executing.
@@ -237,10 +274,10 @@ func TestQueryExecutor_Close(t *testing.T) {
 	select {
 	case <-ch2:
 	case <-time.After(100 * time.Millisecond):
-		t.Error("closing the query manager did not kill the query after 100 milliseconds")
+		t.Fatal("closing the query manager did not kill the query after 100 milliseconds")
 	}
 
-	results = e.ExecuteQuery(q, "mydb", 100, false, nil)
+	results = e.ExecuteQuery(q, influxql.ExecutionOptions{}, nil)
 	result := <-results
 	if len(result.Series) != 0 {
 		t.Errorf("expected %d rows, got %d", 0, len(result.Series))
@@ -256,20 +293,70 @@ func TestQueryExecutor_Panic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := influxql.NewQueryExecutor()
+	e := NewQueryExecutor()
 	e.StatementExecutor = &StatementExecutor{
-		ExecuteStatementFn: func(stmt influxql.Statement, ctx *influxql.ExecutionContext) error {
+		ExecuteStatementFn: func(stmt influxql.Statement, ctx influxql.ExecutionContext) error {
 			panic("test error")
 		},
 	}
 
-	results := e.ExecuteQuery(q, "mydb", 100, false, nil)
+	results := e.ExecuteQuery(q, influxql.ExecutionOptions{}, nil)
 	result := <-results
 	if len(result.Series) != 0 {
 		t.Errorf("expected %d rows, got %d", 0, len(result.Series))
 	}
 	if result.Err == nil || result.Err.Error() != "SELECT count(value) FROM cpu [panic:test error]" {
 		t.Errorf("unexpected error: %s", result.Err)
+	}
+}
+
+func TestQueryExecutor_InvalidSource(t *testing.T) {
+	e := NewQueryExecutor()
+	e.StatementExecutor = &StatementExecutor{
+		ExecuteStatementFn: func(stmt influxql.Statement, ctx influxql.ExecutionContext) error {
+			return errors.New("statement executed unexpectedly")
+		},
+	}
+
+	for i, tt := range []struct {
+		q   string
+		err string
+	}{
+		{
+			q:   `SELECT fieldKey, fieldType FROM _fieldKeys`,
+			err: `unable to use system source '_fieldKeys': use SHOW FIELD KEYS instead`,
+		},
+		{
+			q:   `SELECT "name" FROM _measurements`,
+			err: `unable to use system source '_measurements': use SHOW MEASUREMENTS instead`,
+		},
+		{
+			q:   `SELECT "key" FROM _series`,
+			err: `unable to use system source '_series': use SHOW SERIES instead`,
+		},
+		{
+			q:   `SELECT tagKey FROM _tagKeys`,
+			err: `unable to use system source '_tagKeys': use SHOW TAG KEYS instead`,
+		},
+		{
+			q:   `SELECT "key", value FROM _tags`,
+			err: `unable to use system source '_tags': use SHOW TAG VALUES instead`,
+		},
+	} {
+		q, err := influxql.ParseQuery(tt.q)
+		if err != nil {
+			t.Errorf("%d. unable to parse: %s", i, tt.q)
+			continue
+		}
+
+		results := e.ExecuteQuery(q, influxql.ExecutionOptions{}, nil)
+		result := <-results
+		if len(result.Series) != 0 {
+			t.Errorf("%d. expected %d rows, got %d", 0, i, len(result.Series))
+		}
+		if result.Err == nil || result.Err.Error() != tt.err {
+			t.Errorf("%d. unexpected error: %s", i, result.Err)
+		}
 	}
 }
 

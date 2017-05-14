@@ -91,6 +91,13 @@ func NewFloatDerivativeReducer(interval Interval, isNonNegative, ascending bool)
 
 // AggregateFloat aggregates a point into the reducer and updates the current window.
 func (r *FloatDerivativeReducer) AggregateFloat(p *FloatPoint) {
+	// Skip past a point when it does not advance the stream. A joined series
+	// may have multiple points at the same time so we will discard anything
+	// except the first point we encounter.
+	if !r.curr.Nil && r.curr.Time == p.Time {
+		return
+	}
+
 	r.prev = r.curr
 	r.curr = *p
 }
@@ -106,6 +113,9 @@ func (r *FloatDerivativeReducer) Emit() []FloatPoint {
 			elapsed = -elapsed
 		}
 		value := diff / (float64(elapsed) / float64(r.interval.Duration))
+
+		// Mark this point as read by changing the previous point to nil.
+		r.prev.Nil = true
 
 		// Drop negative values for non-negative derivatives.
 		if r.isNonNegative && diff < 0 {
@@ -138,6 +148,13 @@ func NewIntegerDerivativeReducer(interval Interval, isNonNegative, ascending boo
 
 // AggregateInteger aggregates a point into the reducer and updates the current window.
 func (r *IntegerDerivativeReducer) AggregateInteger(p *IntegerPoint) {
+	// Skip past a point when it does not advance the stream. A joined series
+	// may have multiple points at the same time so we will discard anything
+	// except the first point we encounter.
+	if !r.curr.Nil && r.curr.Time == p.Time {
+		return
+	}
+
 	r.prev = r.curr
 	r.curr = *p
 }
@@ -154,6 +171,9 @@ func (r *IntegerDerivativeReducer) Emit() []FloatPoint {
 		}
 		value := diff / (float64(elapsed) / float64(r.interval.Duration))
 
+		// Mark this point as read by changing the previous point to nil.
+		r.prev.Nil = true
+
 		// Drop negative values for non-negative derivatives.
 		if r.isNonNegative && diff < 0 {
 			return nil
@@ -165,20 +185,29 @@ func (r *IntegerDerivativeReducer) Emit() []FloatPoint {
 
 // FloatDifferenceReducer calculates the derivative of the aggregated points.
 type FloatDifferenceReducer struct {
-	prev FloatPoint
-	curr FloatPoint
+	isNonNegative bool
+	prev          FloatPoint
+	curr          FloatPoint
 }
 
 // NewFloatDifferenceReducer creates a new FloatDifferenceReducer.
-func NewFloatDifferenceReducer() *FloatDifferenceReducer {
+func NewFloatDifferenceReducer(isNonNegative bool) *FloatDifferenceReducer {
 	return &FloatDifferenceReducer{
-		prev: FloatPoint{Nil: true},
-		curr: FloatPoint{Nil: true},
+		isNonNegative: isNonNegative,
+		prev:          FloatPoint{Nil: true},
+		curr:          FloatPoint{Nil: true},
 	}
 }
 
 // AggregateFloat aggregates a point into the reducer and updates the current window.
 func (r *FloatDifferenceReducer) AggregateFloat(p *FloatPoint) {
+	// Skip past a point when it does not advance the stream. A joined series
+	// may have multiple points at the same time so we will discard anything
+	// except the first point we encounter.
+	if !r.curr.Nil && r.curr.Time == p.Time {
+		return
+	}
+
 	r.prev = r.curr
 	r.curr = *p
 }
@@ -188,6 +217,15 @@ func (r *FloatDifferenceReducer) Emit() []FloatPoint {
 	if !r.prev.Nil {
 		// Calculate the difference of successive points.
 		value := r.curr.Value - r.prev.Value
+
+		// If it is non_negative_difference discard any negative value. Since
+		// prev is still marked as unread. The correctness can be ensured.
+		if r.isNonNegative && value < 0 {
+			return nil
+		}
+
+		// Mark this point as read by changing the previous point to nil.
+		r.prev.Nil = true
 		return []FloatPoint{{Time: r.curr.Time, Value: value}}
 	}
 	return nil
@@ -195,20 +233,29 @@ func (r *FloatDifferenceReducer) Emit() []FloatPoint {
 
 // IntegerDifferenceReducer calculates the derivative of the aggregated points.
 type IntegerDifferenceReducer struct {
-	prev IntegerPoint
-	curr IntegerPoint
+	isNonNegative bool
+	prev          IntegerPoint
+	curr          IntegerPoint
 }
 
 // NewIntegerDifferenceReducer creates a new IntegerDifferenceReducer.
-func NewIntegerDifferenceReducer() *IntegerDifferenceReducer {
+func NewIntegerDifferenceReducer(isNonNegative bool) *IntegerDifferenceReducer {
 	return &IntegerDifferenceReducer{
-		prev: IntegerPoint{Nil: true},
-		curr: IntegerPoint{Nil: true},
+		isNonNegative: isNonNegative,
+		prev:          IntegerPoint{Nil: true},
+		curr:          IntegerPoint{Nil: true},
 	}
 }
 
 // AggregateInteger aggregates a point into the reducer and updates the current window.
 func (r *IntegerDifferenceReducer) AggregateInteger(p *IntegerPoint) {
+	// Skip past a point when it does not advance the stream. A joined series
+	// may have multiple points at the same time so we will discard anything
+	// except the first point we encounter.
+	if !r.curr.Nil && r.curr.Time == p.Time {
+		return
+	}
+
 	r.prev = r.curr
 	r.curr = *p
 }
@@ -218,6 +265,16 @@ func (r *IntegerDifferenceReducer) Emit() []IntegerPoint {
 	if !r.prev.Nil {
 		// Calculate the difference of successive points.
 		value := r.curr.Value - r.prev.Value
+
+		// If it is non_negative_difference discard any negative value. Since
+		// prev is still marked as unread. The correctness can be ensured.
+		if r.isNonNegative && value < 0 {
+			return nil
+		}
+
+		// Mark this point as read by changing the previous point to nil.
+		r.prev.Nil = true
+
 		return []IntegerPoint{{Time: r.curr.Time, Value: value}}
 	}
 	return nil
@@ -317,19 +374,63 @@ func (r *IntegerMovingAverageReducer) Emit() []FloatPoint {
 	}
 }
 
+// FloatCumulativeSumReducer cumulates the values from each point.
+type FloatCumulativeSumReducer struct {
+	curr FloatPoint
+}
+
+// NewFloatCumulativeSumReducer creates a new FloatCumulativeSumReducer.
+func NewFloatCumulativeSumReducer() *FloatCumulativeSumReducer {
+	return &FloatCumulativeSumReducer{
+		curr: FloatPoint{Nil: true},
+	}
+}
+
+func (r *FloatCumulativeSumReducer) AggregateFloat(p *FloatPoint) {
+	r.curr.Value += p.Value
+	r.curr.Time = p.Time
+	r.curr.Nil = false
+}
+
+func (r *FloatCumulativeSumReducer) Emit() []FloatPoint {
+	var pts []FloatPoint
+	if !r.curr.Nil {
+		pts = []FloatPoint{r.curr}
+	}
+	return pts
+}
+
+// IntegerCumulativeSumReducer cumulates the values from each point.
+type IntegerCumulativeSumReducer struct {
+	curr IntegerPoint
+}
+
+// NewIntegerCumulativeSumReducer creates a new IntegerCumulativeSumReducer.
+func NewIntegerCumulativeSumReducer() *IntegerCumulativeSumReducer {
+	return &IntegerCumulativeSumReducer{
+		curr: IntegerPoint{Nil: true},
+	}
+}
+
+func (r *IntegerCumulativeSumReducer) AggregateInteger(p *IntegerPoint) {
+	r.curr.Value += p.Value
+	r.curr.Time = p.Time
+	r.curr.Nil = false
+}
+
+func (r *IntegerCumulativeSumReducer) Emit() []IntegerPoint {
+	var pts []IntegerPoint
+	if !r.curr.Nil {
+		pts = []IntegerPoint{r.curr}
+	}
+	return pts
+}
+
 // FloatHoltWintersReducer forecasts a series into the future.
 // This is done using the Holt-Winters damped method.
 //    1. Using the series the initial values are calculated using a SSE.
 //    2. The series is forecasted into the future using the iterative relations.
 type FloatHoltWintersReducer struct {
-	// Smoothing parameters
-	alpha,
-	beta,
-	gamma float64
-
-	// Dampening parameter
-	phi float64
-
 	// Season period
 	m        int
 	seasonal bool
@@ -339,6 +440,8 @@ type FloatHoltWintersReducer struct {
 
 	// Interval between points
 	interval int64
+	// interval / 2 -- used to perform rounding
+	halfInterval int64
 
 	// Whether to include all data or only future values
 	includeFitData bool
@@ -353,11 +456,19 @@ type FloatHoltWintersReducer struct {
 }
 
 const (
-	defaultAlpha   = 0.5
-	defaultBeta    = 0.5
-	defaultGamma   = 0.5
-	defaultPhi     = 0.5
-	defaultEpsilon = 1.0e-4
+	// Arbitrary weight for initializing some intial guesses.
+	// This should be in the  range [0,1]
+	hwWeight = 0.5
+	// Epsilon value for the minimization process
+	hwDefaultEpsilon = 1.0e-4
+	// Define a grid of initial guesses for the parameters: alpha, beta, gamma, and phi.
+	// Keep in mind that this grid is N^4 so we should keep N small
+	// The starting lower guess
+	hwGuessLower = 0.3
+	//  The upper bound on the grid
+	hwGuessUpper = 1.0
+	// The step between guesses
+	hwGuessStep = 0.4
 )
 
 // NewFloatHoltWintersReducer creates a new FloatHoltWintersReducer.
@@ -367,17 +478,14 @@ func NewFloatHoltWintersReducer(h, m int, includeFitData bool, interval time.Dur
 		seasonal = false
 	}
 	return &FloatHoltWintersReducer{
-		alpha:          defaultAlpha,
-		beta:           defaultBeta,
-		gamma:          defaultGamma,
-		phi:            defaultPhi,
 		h:              h,
 		m:              m,
 		seasonal:       seasonal,
 		includeFitData: includeFitData,
 		interval:       int64(interval),
+		halfInterval:   int64(interval) / 2,
 		optim:          neldermead.New(),
-		epsilon:        defaultEpsilon,
+		epsilon:        hwDefaultEpsilon,
 	}
 }
 
@@ -399,9 +507,17 @@ func (r *FloatHoltWintersReducer) AggregateInteger(p *IntegerPoint) {
 }
 
 func (r *FloatHoltWintersReducer) roundTime(t int64) int64 {
-	return r.interval * ((t + r.interval/2) / r.interval)
+	// Overflow safe round function
+	remainder := t % r.interval
+	if remainder > r.halfInterval {
+		// Round up
+		return (t/r.interval + 1) * r.interval
+	}
+	// Round down
+	return (t / r.interval) * r.interval
 }
 
+// Emit returns the points generated by the HoltWinters algorithm.
 func (r *FloatHoltWintersReducer) Emit() []FloatPoint {
 	if l := len(r.points); l < 2 || r.seasonal && l < r.m || r.h <= 0 {
 		return nil
@@ -431,41 +547,35 @@ func (r *FloatHoltWintersReducer) Emit() []FloatPoint {
 		r.y = append(r.y, p.Value)
 	}
 
-	// Smoothing parameters
-	alpha, beta, gamma := r.alpha, r.beta, r.gamma
-
 	// Seasonality
 	m := r.m
-
-	// Dampening paramter
-	phi := r.phi
 
 	// Starting guesses
 	// NOTE: Since these values are guesses
 	// in the cases where we were missing data,
 	// we can just skip the value and call it good.
 
-	l_0 := 0.0
+	l0 := 0.0
 	if r.seasonal {
 		for i := 0; i < m; i++ {
 			if !math.IsNaN(r.y[i]) {
-				l_0 += (1 / float64(m)) * r.y[i]
+				l0 += (1 / float64(m)) * r.y[i]
 			}
 		}
 	} else {
-		l_0 += alpha * r.y[0]
+		l0 += hwWeight * r.y[0]
 	}
 
-	b_0 := 0.0
+	b0 := 0.0
 	if r.seasonal {
 		for i := 0; i < m && m+i < len(r.y); i++ {
 			if !math.IsNaN(r.y[i]) && !math.IsNaN(r.y[m+i]) {
-				b_0 += 1 / float64(m*m) * (r.y[m+i] - r.y[i])
+				b0 += 1 / float64(m*m) * (r.y[m+i] - r.y[i])
 			}
 		}
 	} else {
 		if !math.IsNaN(r.y[1]) {
-			b_0 = beta * (r.y[1] - r.y[0])
+			b0 = hwWeight * (r.y[1] - r.y[0])
 		}
 	}
 
@@ -474,7 +584,7 @@ func (r *FloatHoltWintersReducer) Emit() []FloatPoint {
 		s = make([]float64, m)
 		for i := 0; i < m; i++ {
 			if !math.IsNaN(r.y[i]) {
-				s[i] = r.y[i] / l_0
+				s[i] = r.y[i] / l0
 			} else {
 				s[i] = 0
 			}
@@ -482,40 +592,59 @@ func (r *FloatHoltWintersReducer) Emit() []FloatPoint {
 	}
 
 	parameters := make([]float64, 6+len(s))
-	parameters[0] = alpha
-	parameters[1] = beta
-	parameters[2] = gamma
-	parameters[3] = phi
-	parameters[4] = l_0
-	parameters[5] = b_0
+	parameters[4] = l0
+	parameters[5] = b0
 	o := len(parameters) - len(s)
 	for i := range s {
 		parameters[i+o] = s[i]
 	}
 
 	// Determine best fit for the various parameters
-	_, params := r.optim.Optimize(r.sse, parameters, r.epsilon, 1, r.constrain)
+	minSSE := math.Inf(1)
+	var bestParams []float64
+	for alpha := hwGuessLower; alpha < hwGuessUpper; alpha += hwGuessStep {
+		for beta := hwGuessLower; beta < hwGuessUpper; beta += hwGuessStep {
+			for gamma := hwGuessLower; gamma < hwGuessUpper; gamma += hwGuessStep {
+				for phi := hwGuessLower; phi < hwGuessUpper; phi += hwGuessStep {
+					parameters[0] = alpha
+					parameters[1] = beta
+					parameters[2] = gamma
+					parameters[3] = phi
+					sse, params := r.optim.Optimize(r.sse, parameters, r.epsilon, 1)
+					if sse < minSSE || bestParams == nil {
+						minSSE = sse
+						bestParams = params
+					}
+				}
+			}
+		}
+	}
 
 	// Forecast
-	forecasted := r.forecast(r.h, params)
+	forecasted := r.forecast(r.h, bestParams)
 	var points []FloatPoint
 	if r.includeFitData {
-		points = make([]FloatPoint, len(forecasted))
+		start := r.points[0].Time
+		points = make([]FloatPoint, 0, len(forecasted))
 		for i, v := range forecasted {
-			t := start + r.interval*(int64(i))
-			points[i] = FloatPoint{
-				Value: v,
-				Time:  t,
+			if !math.IsNaN(v) {
+				t := start + r.interval*(int64(i))
+				points = append(points, FloatPoint{
+					Value: v,
+					Time:  t,
+				})
 			}
 		}
 	} else {
-		points = make([]FloatPoint, r.h)
-		forecasted := r.forecast(r.h, params)
+		stop := r.points[len(r.points)-1].Time
+		points = make([]FloatPoint, 0, r.h)
 		for i, v := range forecasted[len(r.y):] {
-			t := stop + r.interval*(int64(i)+1)
-			points[i] = FloatPoint{
-				Value: v,
-				Time:  t,
+			if !math.IsNaN(v) {
+				t := stop + r.interval*(int64(i)+1)
+				points = append(points, FloatPoint{
+					Value: v,
+					Time:  t,
+				})
 			}
 		}
 	}
@@ -525,26 +654,28 @@ func (r *FloatHoltWintersReducer) Emit() []FloatPoint {
 }
 
 // Using the recursive relations compute the next values
-func (r *FloatHoltWintersReducer) next(alpha, beta, gamma, phi, phi_h, y_t, l_tp, b_tp, s_tm, s_tmh float64) (y_th, l_t, b_t, s_t float64) {
-	l_t = alpha*(y_t/s_tm) + (1-alpha)*(l_tp+phi*b_tp)
-	b_t = beta*(l_t-l_tp) + (1-beta)*phi*b_tp
-	s_t = gamma*(y_t/(l_tp+phi*b_tp)) + (1-gamma)*s_tm
-	y_th = (l_t + phi_h*b_t) * s_tmh
+func (r *FloatHoltWintersReducer) next(alpha, beta, gamma, phi, phiH, yT, lTp, bTp, sTm, sTmh float64) (yTh, lT, bT, sT float64) {
+	lT = alpha*(yT/sTm) + (1-alpha)*(lTp+phi*bTp)
+	bT = beta*(lT-lTp) + (1-beta)*phi*bTp
+	sT = gamma*(yT/(lTp+phi*bTp)) + (1-gamma)*sTm
+	yTh = (lT + phiH*bT) * sTmh
 	return
 }
 
 // Forecast the data h points into the future.
 func (r *FloatHoltWintersReducer) forecast(h int, params []float64) []float64 {
-	y_t := r.y[0]
+	// Constrain parameters
+	r.constrain(params)
+
+	yT := r.y[0]
 
 	phi := params[3]
-	phi_h := phi
+	phiH := phi
 
-	l_t := params[4]
-	b_t := params[5]
-	s_t := 0.0
+	lT := params[4]
+	bT := params[5]
 
-	// seasonals is a ring buffer of past s_t values
+	// seasonals is a ring buffer of past sT values
 	var seasonals []float64
 	var m, so int
 	if r.seasonal {
@@ -558,36 +689,37 @@ func (r *FloatHoltWintersReducer) forecast(h int, params []float64) []float64 {
 	}
 
 	forecasted := make([]float64, len(r.y)+h)
-	forecasted[0] = y_t
+	forecasted[0] = yT
 	l := len(r.y)
 	var hm int
 	stm, stmh := 1.0, 1.0
 	for t := 1; t < l+h; t++ {
 		if r.seasonal {
-			hm = (t - 1) % m
+			hm = t % m
 			stm = seasonals[(t-m+so)%m]
 			stmh = seasonals[(t-m+hm+so)%m]
 		}
-		y_t, l_t, b_t, s_t = r.next(
+		var sT float64
+		yT, lT, bT, sT = r.next(
 			params[0], // alpha
 			params[1], // beta
 			params[2], // gamma
 			phi,
-			phi_h,
-			y_t,
-			l_t,
-			b_t,
+			phiH,
+			yT,
+			lT,
+			bT,
 			stm,
 			stmh,
 		)
-		phi_h += math.Pow(phi, float64(t))
+		phiH += math.Pow(phi, float64(t))
 
 		if r.seasonal {
+			seasonals[(t+so)%m] = sT
 			so++
-			seasonals[(t+so)%m] = s_t
 		}
 
-		forecasted[t] = y_t
+		forecasted[t] = yT
 	}
 	return forecasted
 }
@@ -600,6 +732,10 @@ func (r *FloatHoltWintersReducer) sse(params []float64) float64 {
 		// Skip missing values since we cannot use them to compute an error.
 		if !math.IsNaN(r.y[i]) {
 			// Compute error
+			if math.IsNaN(forecasted[i]) {
+				// Penalize forecasted NaNs
+				return math.Inf(1)
+			}
 			diff := forecasted[i] - r.y[i]
 			sse += diff * diff
 		}
@@ -637,4 +773,217 @@ func (r *FloatHoltWintersReducer) constrain(x []float64) {
 	if x[3] < 0 {
 		x[3] = 0
 	}
+}
+
+// FloatIntegralReducer calculates the time-integral of the aggregated points.
+type FloatIntegralReducer struct {
+	interval Interval
+	sum      float64
+	prev     FloatPoint
+	window   struct {
+		start int64
+		end   int64
+	}
+	ch  chan FloatPoint
+	opt IteratorOptions
+}
+
+// NewFloatIntegralReducer creates a new FloatIntegralReducer.
+func NewFloatIntegralReducer(interval Interval, opt IteratorOptions) *FloatIntegralReducer {
+	return &FloatIntegralReducer{
+		interval: interval,
+		prev:     FloatPoint{Nil: true},
+		ch:       make(chan FloatPoint, 1),
+		opt:      opt,
+	}
+}
+
+// AggregateFloat aggregates a point into the reducer.
+func (r *FloatIntegralReducer) AggregateFloat(p *FloatPoint) {
+	// If this is the first point, just save it
+	if r.prev.Nil {
+		r.prev = *p
+		if !r.opt.Interval.IsZero() {
+			// Record the end of the time interval.
+			// We do not care for whether the last number is inclusive or exclusive
+			// because we treat both the same for the involved math.
+			if r.opt.Ascending {
+				r.window.start, r.window.end = r.opt.Window(p.Time)
+			} else {
+				r.window.end, r.window.start = r.opt.Window(p.Time)
+			}
+		}
+		return
+	}
+
+	// If this point has the same timestamp as the previous one,
+	// skip the point. Points sent into this reducer are expected
+	// to be fed in order.
+	if r.prev.Time == p.Time {
+		r.prev = *p
+		return
+	} else if !r.opt.Interval.IsZero() && ((r.opt.Ascending && p.Time >= r.window.end) || (!r.opt.Ascending && p.Time <= r.window.end)) {
+		// If our previous time is not equal to the window, we need to
+		// interpolate the area at the end of this interval.
+		if r.prev.Time != r.window.end {
+			value := linearFloat(r.window.end, r.prev.Time, p.Time, r.prev.Value, p.Value)
+			elapsed := float64(r.window.end-r.prev.Time) / float64(r.interval.Duration)
+			r.sum += 0.5 * (value + r.prev.Value) * elapsed
+
+			r.prev.Value = value
+			r.prev.Time = r.window.end
+		}
+
+		// Emit the current point through the channel and then clear it.
+		r.ch <- FloatPoint{Time: r.window.start, Value: r.sum}
+		if r.opt.Ascending {
+			r.window.start, r.window.end = r.opt.Window(p.Time)
+		} else {
+			r.window.end, r.window.start = r.opt.Window(p.Time)
+		}
+		r.sum = 0.0
+	}
+
+	// Normal operation: update the sum using the trapezium rule
+	elapsed := float64(p.Time-r.prev.Time) / float64(r.interval.Duration)
+	r.sum += 0.5 * (p.Value + r.prev.Value) * elapsed
+	r.prev = *p
+}
+
+// Emit emits the time-integral of the aggregated points as a single point.
+// InfluxQL convention dictates that outside a group-by-time clause we return
+// a timestamp of zero.  Within a group-by-time, we can set the time to ZeroTime
+// and a higher level will change it to the start of the time group.
+func (r *FloatIntegralReducer) Emit() []FloatPoint {
+	select {
+	case pt, ok := <-r.ch:
+		if !ok {
+			return nil
+		}
+		return []FloatPoint{pt}
+	default:
+		return nil
+	}
+}
+
+// Close flushes any in progress points to ensure any remaining points are
+// emitted.
+func (r *FloatIntegralReducer) Close() error {
+	// If our last point is at the start time, then discard this point since
+	// there is no area within this bucket. Otherwise, send off what we
+	// currently have as the final point.
+	if !r.prev.Nil && r.prev.Time != r.window.start {
+		r.ch <- FloatPoint{Time: r.window.start, Value: r.sum}
+	}
+	close(r.ch)
+	return nil
+}
+
+// IntegerIntegralReducer calculates the time-integral of the aggregated points.
+type IntegerIntegralReducer struct {
+	interval Interval
+	sum      float64
+	prev     IntegerPoint
+	window   struct {
+		start int64
+		end   int64
+	}
+	ch  chan FloatPoint
+	opt IteratorOptions
+}
+
+// NewIntegerIntegralReducer creates a new IntegerIntegralReducer.
+func NewIntegerIntegralReducer(interval Interval, opt IteratorOptions) *IntegerIntegralReducer {
+	return &IntegerIntegralReducer{
+		interval: interval,
+		prev:     IntegerPoint{Nil: true},
+		ch:       make(chan FloatPoint, 1),
+		opt:      opt,
+	}
+}
+
+// AggregateInteger aggregates a point into the reducer.
+func (r *IntegerIntegralReducer) AggregateInteger(p *IntegerPoint) {
+	// If this is the first point, just save it
+	if r.prev.Nil {
+		r.prev = *p
+
+		// Record the end of the time interval.
+		// We do not care for whether the last number is inclusive or exclusive
+		// because we treat both the same for the involved math.
+		if r.opt.Ascending {
+			r.window.start, r.window.end = r.opt.Window(p.Time)
+		} else {
+			r.window.end, r.window.start = r.opt.Window(p.Time)
+		}
+
+		// If we see the minimum allowable time, set the time to zero so we don't
+		// break the default returned time for aggregate queries without times.
+		if r.window.start == MinTime {
+			r.window.start = 0
+		}
+		return
+	}
+
+	// If this point has the same timestamp as the previous one,
+	// skip the point. Points sent into this reducer are expected
+	// to be fed in order.
+	value := float64(p.Value)
+	if r.prev.Time == p.Time {
+		r.prev = *p
+		return
+	} else if (r.opt.Ascending && p.Time >= r.window.end) || (!r.opt.Ascending && p.Time <= r.window.end) {
+		// If our previous time is not equal to the window, we need to
+		// interpolate the area at the end of this interval.
+		if r.prev.Time != r.window.end {
+			value = linearFloat(r.window.end, r.prev.Time, p.Time, float64(r.prev.Value), value)
+			elapsed := float64(r.window.end-r.prev.Time) / float64(r.interval.Duration)
+			r.sum += 0.5 * (value + float64(r.prev.Value)) * elapsed
+
+			r.prev.Time = r.window.end
+		}
+
+		// Emit the current point through the channel and then clear it.
+		r.ch <- FloatPoint{Time: r.window.start, Value: r.sum}
+		if r.opt.Ascending {
+			r.window.start, r.window.end = r.opt.Window(p.Time)
+		} else {
+			r.window.end, r.window.start = r.opt.Window(p.Time)
+		}
+		r.sum = 0.0
+	}
+
+	// Normal operation: update the sum using the trapezium rule
+	elapsed := float64(p.Time-r.prev.Time) / float64(r.interval.Duration)
+	r.sum += 0.5 * (value + float64(r.prev.Value)) * elapsed
+	r.prev = *p
+}
+
+// Emit emits the time-integral of the aggregated points as a single FLOAT point
+// InfluxQL convention dictates that outside a group-by-time clause we return
+// a timestamp of zero.  Within a group-by-time, we can set the time to ZeroTime
+// and a higher level will change it to the start of the time group.
+func (r *IntegerIntegralReducer) Emit() []FloatPoint {
+	select {
+	case pt, ok := <-r.ch:
+		if !ok {
+			return nil
+		}
+		return []FloatPoint{pt}
+	default:
+		return nil
+	}
+}
+
+// Close flushes any in progress points to ensure any remaining points are
+// emitted.
+func (r *IntegerIntegralReducer) Close() error {
+	// If our last point is at the start time, then discard this point since
+	// there is no area within this bucket. Otherwise, send off what we
+	// currently have as the final point.
+	if !r.prev.Nil && r.prev.Time != r.window.start {
+		r.ch <- FloatPoint{Time: r.window.start, Value: r.sum}
+	}
+	close(r.ch)
+	return nil
 }

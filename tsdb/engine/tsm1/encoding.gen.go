@@ -30,6 +30,18 @@ func (a Values) Size() int {
 	return sz
 }
 
+func (a Values) ordered() bool {
+	if len(a) <= 1 {
+		return true
+	}
+	for i := 1; i < len(a); i++ {
+		if av, ab := a[i-1].UnixNano(), a[i].UnixNano(); av >= ab {
+			return false
+		}
+	}
+	return true
+}
+
 func (a Values) assertOrdered() {
 	if len(a) <= 1 {
 		return
@@ -44,18 +56,34 @@ func (a Values) assertOrdered() {
 // Deduplicate returns a new slice with any values that have the same timestamp removed.
 // The Value that appears last in the slice is the one that is kept.
 func (a Values) Deduplicate() Values {
-	m := make(map[int64]Value)
-	for _, val := range a {
-		m[val.UnixNano()] = val
+	if len(a) == 0 {
+		return a
 	}
 
-	other := make(Values, 0, len(m))
-	for _, val := range m {
-		other = append(other, val)
+	// See if we're already sorted and deduped
+	var needSort bool
+	for i := 1; i < len(a); i++ {
+		if a[i-1].UnixNano() >= a[i].UnixNano() {
+			needSort = true
+			break
+		}
 	}
 
-	sort.Sort(other)
-	return other
+	if !needSort {
+		return a
+	}
+
+	sort.Stable(a)
+	var i int
+	for j := 1; j < len(a); j++ {
+		v := a[j]
+		if v.UnixNano() != a[i].UnixNano() {
+			i++
+		}
+		a[i] = v
+
+	}
+	return a[:i+1]
 }
 
 //  Exclude returns the subset of values not in [min, max]
@@ -98,6 +126,12 @@ func (a Values) Merge(b Values) Values {
 		return a
 	}
 
+	// Normally, both a and b should not contain duplicates.  Due to a bug in older versions, it's
+	// possible stored blocks might contain duplicate values.  Remove them if they exists before
+	// merging.
+	a = a.Deduplicate()
+	b = b.Deduplicate()
+
 	if a[len(a)-1].UnixNano() < b[0].UnixNano() {
 		return append(a, b...)
 	}
@@ -106,52 +140,20 @@ func (a Values) Merge(b Values) Values {
 		return append(b, a...)
 	}
 
-	for i := 0; i < len(a) && len(b) > 0; i++ {
-		av, bv := a[i].UnixNano(), b[0].UnixNano()
-		// Value in a is greater than B, we need to merge
-		if av > bv {
-			// Save value in a
-			temp := a[i]
-
-			// Overwrite a with b
-			a[i] = b[0]
-
-			// Slide all values of b down 1
-			copy(b, b[1:])
-			b = b[:len(b)-1]
-
-			var k int
-			if len(b) > 0 && av > b[len(b)-1].UnixNano() {
-				// Fast path where a is after b, we skip the search
-				k = len(b)
-			} else {
-				// See where value we save from a should be inserted in b to keep b sorted
-				k = sort.Search(len(b), func(i int) bool { return b[i].UnixNano() >= temp.UnixNano() })
-			}
-
-			if k == len(b) {
-				// Last position?
-				b = append(b, temp)
-			} else if b[k].UnixNano() != temp.UnixNano() {
-				// Save the last element, since it will get overwritten
-				last := b[len(b)-1]
-				// Somewhere in the middle of b, insert it only if it's not a duplicate
-				copy(b[k+1:], b[k:])
-				// Add the last vale to the end
-				b = append(b, last)
-				b[k] = temp
-			}
-		} else if av == bv {
-			// Value in a an b are the same, use b
-			a[i] = b[0]
-			b = b[1:]
+	out := make(Values, 0, len(a)+len(b))
+	for len(a) > 0 && len(b) > 0 {
+		if a[0].UnixNano() < b[0].UnixNano() {
+			out, a = append(out, a[0]), a[1:]
+		} else if len(b) > 0 && a[0].UnixNano() == b[0].UnixNano() {
+			a = a[1:]
+		} else {
+			out, b = append(out, b[0]), b[1:]
 		}
 	}
-
-	if len(b) > 0 {
-		return append(a, b...)
+	if len(a) > 0 {
+		return append(out, a...)
 	}
-	return a
+	return append(out, b...)
 }
 
 // Sort methods
@@ -178,6 +180,18 @@ func (a FloatValues) Size() int {
 	return sz
 }
 
+func (a FloatValues) ordered() bool {
+	if len(a) <= 1 {
+		return true
+	}
+	for i := 1; i < len(a); i++ {
+		if av, ab := a[i-1].UnixNano(), a[i].UnixNano(); av >= ab {
+			return false
+		}
+	}
+	return true
+}
+
 func (a FloatValues) assertOrdered() {
 	if len(a) <= 1 {
 		return
@@ -192,18 +206,34 @@ func (a FloatValues) assertOrdered() {
 // Deduplicate returns a new slice with any values that have the same timestamp removed.
 // The Value that appears last in the slice is the one that is kept.
 func (a FloatValues) Deduplicate() FloatValues {
-	m := make(map[int64]FloatValue)
-	for _, val := range a {
-		m[val.UnixNano()] = val
+	if len(a) == 0 {
+		return a
 	}
 
-	other := make(FloatValues, 0, len(m))
-	for _, val := range m {
-		other = append(other, val)
+	// See if we're already sorted and deduped
+	var needSort bool
+	for i := 1; i < len(a); i++ {
+		if a[i-1].UnixNano() >= a[i].UnixNano() {
+			needSort = true
+			break
+		}
 	}
 
-	sort.Sort(other)
-	return other
+	if !needSort {
+		return a
+	}
+
+	sort.Stable(a)
+	var i int
+	for j := 1; j < len(a); j++ {
+		v := a[j]
+		if v.UnixNano() != a[i].UnixNano() {
+			i++
+		}
+		a[i] = v
+
+	}
+	return a[:i+1]
 }
 
 //  Exclude returns the subset of values not in [min, max]
@@ -246,6 +276,12 @@ func (a FloatValues) Merge(b FloatValues) FloatValues {
 		return a
 	}
 
+	// Normally, both a and b should not contain duplicates.  Due to a bug in older versions, it's
+	// possible stored blocks might contain duplicate values.  Remove them if they exists before
+	// merging.
+	a = a.Deduplicate()
+	b = b.Deduplicate()
+
 	if a[len(a)-1].UnixNano() < b[0].UnixNano() {
 		return append(a, b...)
 	}
@@ -254,52 +290,64 @@ func (a FloatValues) Merge(b FloatValues) FloatValues {
 		return append(b, a...)
 	}
 
-	for i := 0; i < len(a) && len(b) > 0; i++ {
-		av, bv := a[i].UnixNano(), b[0].UnixNano()
-		// Value in a is greater than B, we need to merge
-		if av > bv {
-			// Save value in a
-			temp := a[i]
-
-			// Overwrite a with b
-			a[i] = b[0]
-
-			// Slide all values of b down 1
-			copy(b, b[1:])
-			b = b[:len(b)-1]
-
-			var k int
-			if len(b) > 0 && av > b[len(b)-1].UnixNano() {
-				// Fast path where a is after b, we skip the search
-				k = len(b)
-			} else {
-				// See where value we save from a should be inserted in b to keep b sorted
-				k = sort.Search(len(b), func(i int) bool { return b[i].UnixNano() >= temp.UnixNano() })
-			}
-
-			if k == len(b) {
-				// Last position?
-				b = append(b, temp)
-			} else if b[k].UnixNano() != temp.UnixNano() {
-				// Save the last element, since it will get overwritten
-				last := b[len(b)-1]
-				// Somewhere in the middle of b, insert it only if it's not a duplicate
-				copy(b[k+1:], b[k:])
-				// Add the last vale to the end
-				b = append(b, last)
-				b[k] = temp
-			}
-		} else if av == bv {
-			// Value in a an b are the same, use b
-			a[i] = b[0]
-			b = b[1:]
+	out := make(FloatValues, 0, len(a)+len(b))
+	for len(a) > 0 && len(b) > 0 {
+		if a[0].UnixNano() < b[0].UnixNano() {
+			out, a = append(out, a[0]), a[1:]
+		} else if len(b) > 0 && a[0].UnixNano() == b[0].UnixNano() {
+			a = a[1:]
+		} else {
+			out, b = append(out, b[0]), b[1:]
 		}
 	}
-
-	if len(b) > 0 {
-		return append(a, b...)
+	if len(a) > 0 {
+		return append(out, a...)
 	}
-	return a
+	return append(out, b...)
+}
+
+func (a FloatValues) Encode(buf []byte) ([]byte, error) {
+	return encodeFloatValuesBlock(buf, a)
+}
+
+func encodeFloatValuesBlock(buf []byte, values []FloatValue) ([]byte, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+
+	venc := getFloatEncoder(len(values))
+	tsenc := getTimeEncoder(len(values))
+
+	var b []byte
+	err := func() error {
+		for _, v := range values {
+			tsenc.Write(v.unixnano)
+			venc.Write(v.value)
+		}
+		venc.Flush()
+
+		// Encoded timestamp values
+		tb, err := tsenc.Bytes()
+		if err != nil {
+			return err
+		}
+		// Encoded values
+		vb, err := venc.Bytes()
+		if err != nil {
+			return err
+		}
+
+		// Prepend the first timestamp of the block in the first 8 bytes and the block
+		// in the next byte, followed by the block
+		b = packBlock(buf, BlockFloat64, tb, vb)
+
+		return nil
+	}()
+
+	putTimeEncoder(tsenc)
+	putFloatEncoder(venc)
+
+	return b, err
 }
 
 // Sort methods
@@ -326,6 +374,18 @@ func (a IntegerValues) Size() int {
 	return sz
 }
 
+func (a IntegerValues) ordered() bool {
+	if len(a) <= 1 {
+		return true
+	}
+	for i := 1; i < len(a); i++ {
+		if av, ab := a[i-1].UnixNano(), a[i].UnixNano(); av >= ab {
+			return false
+		}
+	}
+	return true
+}
+
 func (a IntegerValues) assertOrdered() {
 	if len(a) <= 1 {
 		return
@@ -340,18 +400,34 @@ func (a IntegerValues) assertOrdered() {
 // Deduplicate returns a new slice with any values that have the same timestamp removed.
 // The Value that appears last in the slice is the one that is kept.
 func (a IntegerValues) Deduplicate() IntegerValues {
-	m := make(map[int64]IntegerValue)
-	for _, val := range a {
-		m[val.UnixNano()] = val
+	if len(a) == 0 {
+		return a
 	}
 
-	other := make(IntegerValues, 0, len(m))
-	for _, val := range m {
-		other = append(other, val)
+	// See if we're already sorted and deduped
+	var needSort bool
+	for i := 1; i < len(a); i++ {
+		if a[i-1].UnixNano() >= a[i].UnixNano() {
+			needSort = true
+			break
+		}
 	}
 
-	sort.Sort(other)
-	return other
+	if !needSort {
+		return a
+	}
+
+	sort.Stable(a)
+	var i int
+	for j := 1; j < len(a); j++ {
+		v := a[j]
+		if v.UnixNano() != a[i].UnixNano() {
+			i++
+		}
+		a[i] = v
+
+	}
+	return a[:i+1]
 }
 
 //  Exclude returns the subset of values not in [min, max]
@@ -394,6 +470,12 @@ func (a IntegerValues) Merge(b IntegerValues) IntegerValues {
 		return a
 	}
 
+	// Normally, both a and b should not contain duplicates.  Due to a bug in older versions, it's
+	// possible stored blocks might contain duplicate values.  Remove them if they exists before
+	// merging.
+	a = a.Deduplicate()
+	b = b.Deduplicate()
+
 	if a[len(a)-1].UnixNano() < b[0].UnixNano() {
 		return append(a, b...)
 	}
@@ -402,52 +484,64 @@ func (a IntegerValues) Merge(b IntegerValues) IntegerValues {
 		return append(b, a...)
 	}
 
-	for i := 0; i < len(a) && len(b) > 0; i++ {
-		av, bv := a[i].UnixNano(), b[0].UnixNano()
-		// Value in a is greater than B, we need to merge
-		if av > bv {
-			// Save value in a
-			temp := a[i]
-
-			// Overwrite a with b
-			a[i] = b[0]
-
-			// Slide all values of b down 1
-			copy(b, b[1:])
-			b = b[:len(b)-1]
-
-			var k int
-			if len(b) > 0 && av > b[len(b)-1].UnixNano() {
-				// Fast path where a is after b, we skip the search
-				k = len(b)
-			} else {
-				// See where value we save from a should be inserted in b to keep b sorted
-				k = sort.Search(len(b), func(i int) bool { return b[i].UnixNano() >= temp.UnixNano() })
-			}
-
-			if k == len(b) {
-				// Last position?
-				b = append(b, temp)
-			} else if b[k].UnixNano() != temp.UnixNano() {
-				// Save the last element, since it will get overwritten
-				last := b[len(b)-1]
-				// Somewhere in the middle of b, insert it only if it's not a duplicate
-				copy(b[k+1:], b[k:])
-				// Add the last vale to the end
-				b = append(b, last)
-				b[k] = temp
-			}
-		} else if av == bv {
-			// Value in a an b are the same, use b
-			a[i] = b[0]
-			b = b[1:]
+	out := make(IntegerValues, 0, len(a)+len(b))
+	for len(a) > 0 && len(b) > 0 {
+		if a[0].UnixNano() < b[0].UnixNano() {
+			out, a = append(out, a[0]), a[1:]
+		} else if len(b) > 0 && a[0].UnixNano() == b[0].UnixNano() {
+			a = a[1:]
+		} else {
+			out, b = append(out, b[0]), b[1:]
 		}
 	}
-
-	if len(b) > 0 {
-		return append(a, b...)
+	if len(a) > 0 {
+		return append(out, a...)
 	}
-	return a
+	return append(out, b...)
+}
+
+func (a IntegerValues) Encode(buf []byte) ([]byte, error) {
+	return encodeIntegerValuesBlock(buf, a)
+}
+
+func encodeIntegerValuesBlock(buf []byte, values []IntegerValue) ([]byte, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+
+	venc := getIntegerEncoder(len(values))
+	tsenc := getTimeEncoder(len(values))
+
+	var b []byte
+	err := func() error {
+		for _, v := range values {
+			tsenc.Write(v.unixnano)
+			venc.Write(v.value)
+		}
+		venc.Flush()
+
+		// Encoded timestamp values
+		tb, err := tsenc.Bytes()
+		if err != nil {
+			return err
+		}
+		// Encoded values
+		vb, err := venc.Bytes()
+		if err != nil {
+			return err
+		}
+
+		// Prepend the first timestamp of the block in the first 8 bytes and the block
+		// in the next byte, followed by the block
+		b = packBlock(buf, BlockInteger, tb, vb)
+
+		return nil
+	}()
+
+	putTimeEncoder(tsenc)
+	putIntegerEncoder(venc)
+
+	return b, err
 }
 
 // Sort methods
@@ -474,6 +568,18 @@ func (a StringValues) Size() int {
 	return sz
 }
 
+func (a StringValues) ordered() bool {
+	if len(a) <= 1 {
+		return true
+	}
+	for i := 1; i < len(a); i++ {
+		if av, ab := a[i-1].UnixNano(), a[i].UnixNano(); av >= ab {
+			return false
+		}
+	}
+	return true
+}
+
 func (a StringValues) assertOrdered() {
 	if len(a) <= 1 {
 		return
@@ -488,18 +594,34 @@ func (a StringValues) assertOrdered() {
 // Deduplicate returns a new slice with any values that have the same timestamp removed.
 // The Value that appears last in the slice is the one that is kept.
 func (a StringValues) Deduplicate() StringValues {
-	m := make(map[int64]StringValue)
-	for _, val := range a {
-		m[val.UnixNano()] = val
+	if len(a) == 0 {
+		return a
 	}
 
-	other := make(StringValues, 0, len(m))
-	for _, val := range m {
-		other = append(other, val)
+	// See if we're already sorted and deduped
+	var needSort bool
+	for i := 1; i < len(a); i++ {
+		if a[i-1].UnixNano() >= a[i].UnixNano() {
+			needSort = true
+			break
+		}
 	}
 
-	sort.Sort(other)
-	return other
+	if !needSort {
+		return a
+	}
+
+	sort.Stable(a)
+	var i int
+	for j := 1; j < len(a); j++ {
+		v := a[j]
+		if v.UnixNano() != a[i].UnixNano() {
+			i++
+		}
+		a[i] = v
+
+	}
+	return a[:i+1]
 }
 
 //  Exclude returns the subset of values not in [min, max]
@@ -542,6 +664,12 @@ func (a StringValues) Merge(b StringValues) StringValues {
 		return a
 	}
 
+	// Normally, both a and b should not contain duplicates.  Due to a bug in older versions, it's
+	// possible stored blocks might contain duplicate values.  Remove them if they exists before
+	// merging.
+	a = a.Deduplicate()
+	b = b.Deduplicate()
+
 	if a[len(a)-1].UnixNano() < b[0].UnixNano() {
 		return append(a, b...)
 	}
@@ -550,52 +678,64 @@ func (a StringValues) Merge(b StringValues) StringValues {
 		return append(b, a...)
 	}
 
-	for i := 0; i < len(a) && len(b) > 0; i++ {
-		av, bv := a[i].UnixNano(), b[0].UnixNano()
-		// Value in a is greater than B, we need to merge
-		if av > bv {
-			// Save value in a
-			temp := a[i]
-
-			// Overwrite a with b
-			a[i] = b[0]
-
-			// Slide all values of b down 1
-			copy(b, b[1:])
-			b = b[:len(b)-1]
-
-			var k int
-			if len(b) > 0 && av > b[len(b)-1].UnixNano() {
-				// Fast path where a is after b, we skip the search
-				k = len(b)
-			} else {
-				// See where value we save from a should be inserted in b to keep b sorted
-				k = sort.Search(len(b), func(i int) bool { return b[i].UnixNano() >= temp.UnixNano() })
-			}
-
-			if k == len(b) {
-				// Last position?
-				b = append(b, temp)
-			} else if b[k].UnixNano() != temp.UnixNano() {
-				// Save the last element, since it will get overwritten
-				last := b[len(b)-1]
-				// Somewhere in the middle of b, insert it only if it's not a duplicate
-				copy(b[k+1:], b[k:])
-				// Add the last vale to the end
-				b = append(b, last)
-				b[k] = temp
-			}
-		} else if av == bv {
-			// Value in a an b are the same, use b
-			a[i] = b[0]
-			b = b[1:]
+	out := make(StringValues, 0, len(a)+len(b))
+	for len(a) > 0 && len(b) > 0 {
+		if a[0].UnixNano() < b[0].UnixNano() {
+			out, a = append(out, a[0]), a[1:]
+		} else if len(b) > 0 && a[0].UnixNano() == b[0].UnixNano() {
+			a = a[1:]
+		} else {
+			out, b = append(out, b[0]), b[1:]
 		}
 	}
-
-	if len(b) > 0 {
-		return append(a, b...)
+	if len(a) > 0 {
+		return append(out, a...)
 	}
-	return a
+	return append(out, b...)
+}
+
+func (a StringValues) Encode(buf []byte) ([]byte, error) {
+	return encodeStringValuesBlock(buf, a)
+}
+
+func encodeStringValuesBlock(buf []byte, values []StringValue) ([]byte, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+
+	venc := getStringEncoder(len(values))
+	tsenc := getTimeEncoder(len(values))
+
+	var b []byte
+	err := func() error {
+		for _, v := range values {
+			tsenc.Write(v.unixnano)
+			venc.Write(v.value)
+		}
+		venc.Flush()
+
+		// Encoded timestamp values
+		tb, err := tsenc.Bytes()
+		if err != nil {
+			return err
+		}
+		// Encoded values
+		vb, err := venc.Bytes()
+		if err != nil {
+			return err
+		}
+
+		// Prepend the first timestamp of the block in the first 8 bytes and the block
+		// in the next byte, followed by the block
+		b = packBlock(buf, BlockString, tb, vb)
+
+		return nil
+	}()
+
+	putTimeEncoder(tsenc)
+	putStringEncoder(venc)
+
+	return b, err
 }
 
 // Sort methods
@@ -622,6 +762,18 @@ func (a BooleanValues) Size() int {
 	return sz
 }
 
+func (a BooleanValues) ordered() bool {
+	if len(a) <= 1 {
+		return true
+	}
+	for i := 1; i < len(a); i++ {
+		if av, ab := a[i-1].UnixNano(), a[i].UnixNano(); av >= ab {
+			return false
+		}
+	}
+	return true
+}
+
 func (a BooleanValues) assertOrdered() {
 	if len(a) <= 1 {
 		return
@@ -636,18 +788,34 @@ func (a BooleanValues) assertOrdered() {
 // Deduplicate returns a new slice with any values that have the same timestamp removed.
 // The Value that appears last in the slice is the one that is kept.
 func (a BooleanValues) Deduplicate() BooleanValues {
-	m := make(map[int64]BooleanValue)
-	for _, val := range a {
-		m[val.UnixNano()] = val
+	if len(a) == 0 {
+		return a
 	}
 
-	other := make(BooleanValues, 0, len(m))
-	for _, val := range m {
-		other = append(other, val)
+	// See if we're already sorted and deduped
+	var needSort bool
+	for i := 1; i < len(a); i++ {
+		if a[i-1].UnixNano() >= a[i].UnixNano() {
+			needSort = true
+			break
+		}
 	}
 
-	sort.Sort(other)
-	return other
+	if !needSort {
+		return a
+	}
+
+	sort.Stable(a)
+	var i int
+	for j := 1; j < len(a); j++ {
+		v := a[j]
+		if v.UnixNano() != a[i].UnixNano() {
+			i++
+		}
+		a[i] = v
+
+	}
+	return a[:i+1]
 }
 
 //  Exclude returns the subset of values not in [min, max]
@@ -690,6 +858,12 @@ func (a BooleanValues) Merge(b BooleanValues) BooleanValues {
 		return a
 	}
 
+	// Normally, both a and b should not contain duplicates.  Due to a bug in older versions, it's
+	// possible stored blocks might contain duplicate values.  Remove them if they exists before
+	// merging.
+	a = a.Deduplicate()
+	b = b.Deduplicate()
+
 	if a[len(a)-1].UnixNano() < b[0].UnixNano() {
 		return append(a, b...)
 	}
@@ -698,52 +872,64 @@ func (a BooleanValues) Merge(b BooleanValues) BooleanValues {
 		return append(b, a...)
 	}
 
-	for i := 0; i < len(a) && len(b) > 0; i++ {
-		av, bv := a[i].UnixNano(), b[0].UnixNano()
-		// Value in a is greater than B, we need to merge
-		if av > bv {
-			// Save value in a
-			temp := a[i]
-
-			// Overwrite a with b
-			a[i] = b[0]
-
-			// Slide all values of b down 1
-			copy(b, b[1:])
-			b = b[:len(b)-1]
-
-			var k int
-			if len(b) > 0 && av > b[len(b)-1].UnixNano() {
-				// Fast path where a is after b, we skip the search
-				k = len(b)
-			} else {
-				// See where value we save from a should be inserted in b to keep b sorted
-				k = sort.Search(len(b), func(i int) bool { return b[i].UnixNano() >= temp.UnixNano() })
-			}
-
-			if k == len(b) {
-				// Last position?
-				b = append(b, temp)
-			} else if b[k].UnixNano() != temp.UnixNano() {
-				// Save the last element, since it will get overwritten
-				last := b[len(b)-1]
-				// Somewhere in the middle of b, insert it only if it's not a duplicate
-				copy(b[k+1:], b[k:])
-				// Add the last vale to the end
-				b = append(b, last)
-				b[k] = temp
-			}
-		} else if av == bv {
-			// Value in a an b are the same, use b
-			a[i] = b[0]
-			b = b[1:]
+	out := make(BooleanValues, 0, len(a)+len(b))
+	for len(a) > 0 && len(b) > 0 {
+		if a[0].UnixNano() < b[0].UnixNano() {
+			out, a = append(out, a[0]), a[1:]
+		} else if len(b) > 0 && a[0].UnixNano() == b[0].UnixNano() {
+			a = a[1:]
+		} else {
+			out, b = append(out, b[0]), b[1:]
 		}
 	}
-
-	if len(b) > 0 {
-		return append(a, b...)
+	if len(a) > 0 {
+		return append(out, a...)
 	}
-	return a
+	return append(out, b...)
+}
+
+func (a BooleanValues) Encode(buf []byte) ([]byte, error) {
+	return encodeBooleanValuesBlock(buf, a)
+}
+
+func encodeBooleanValuesBlock(buf []byte, values []BooleanValue) ([]byte, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+
+	venc := getBooleanEncoder(len(values))
+	tsenc := getTimeEncoder(len(values))
+
+	var b []byte
+	err := func() error {
+		for _, v := range values {
+			tsenc.Write(v.unixnano)
+			venc.Write(v.value)
+		}
+		venc.Flush()
+
+		// Encoded timestamp values
+		tb, err := tsenc.Bytes()
+		if err != nil {
+			return err
+		}
+		// Encoded values
+		vb, err := venc.Bytes()
+		if err != nil {
+			return err
+		}
+
+		// Prepend the first timestamp of the block in the first 8 bytes and the block
+		// in the next byte, followed by the block
+		b = packBlock(buf, BlockBoolean, tb, vb)
+
+		return nil
+	}()
+
+	putTimeEncoder(tsenc)
+	putBooleanEncoder(venc)
+
+	return b, err
 }
 
 // Sort methods
